@@ -60,3 +60,28 @@ fn arithmetic() {
 fn precedence() {
     run_program_test("precedence");
 }
+
+#[test]
+fn fizzbuzz() {
+    run_program_test("fizzbuzz");
+}
+
+#[test]
+fn collatz() {
+    run_program_test("collatz");
+}
+
+#[test]
+fn boolean_logic() {
+    run_program_test("boolean_logic");
+}
+
+#[test]
+fn mutual_recursion() {
+    run_program_test("mutual_recursion");
+}
+
+#[test]
+fn nested_loops() {
+    run_program_test("nested_loops");
+}

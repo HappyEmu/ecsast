@@ -1,0 +1,25 @@
+fn collatz_steps(n: int) -> int {
+    let steps: int = 0;
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2;
+        } else {
+            n = n * 3 + 1;
+        }
+        steps = steps + 1;
+    }
+    return steps;
+}
+
+fn main() {
+    print("collatz(1) =");
+    print(collatz_steps(1));
+    print("collatz(2) =");
+    print(collatz_steps(2));
+    print("collatz(3) =");
+    print(collatz_steps(3));
+    print("collatz(6) =");
+    print(collatz_steps(6));
+    print("collatz(7) =");
+    print(collatz_steps(7));
+}
