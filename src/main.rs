@@ -1,10 +1,31 @@
 use std::path::PathBuf;
 
 use bumpalo::Bump;
-use clap::Parser as ClapParser;
-use ecsast::codegen;
+use clap::{Parser as ClapParser, ValueEnum};
+use ecsast::codegen::{self, OptLevel};
 use ecsast::lexer::Lexer;
 use ecsast::parser::Parser;
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum CliOptLevel {
+    /// No optimizations
+    #[default]
+    None,
+    /// Optimize for execution speed
+    Speed,
+    /// Optimize for both speed and code size
+    SpeedAndSize,
+}
+
+impl From<CliOptLevel> for OptLevel {
+    fn from(level: CliOptLevel) -> Self {
+        match level {
+            CliOptLevel::None => OptLevel::None,
+            CliOptLevel::Speed => OptLevel::Speed,
+            CliOptLevel::SpeedAndSize => OptLevel::SpeedAndSize,
+        }
+    }
+}
 
 #[derive(ClapParser)]
 #[command(name = "ecsast", about = "ECSAST language compiler")]
@@ -15,6 +36,10 @@ struct Cli {
     /// Output binary path
     #[arg(short, long, default_value = "output")]
     output: PathBuf,
+
+    /// Optimization level
+    #[arg(short = 'O', long = "opt-level", default_value = "none")]
+    opt_level: CliOptLevel,
 }
 
 fn main() {
@@ -33,7 +58,8 @@ fn main() {
     let world = parser.world;
 
     let output = cli.output.to_str().expect("invalid output path");
-    codegen::compile_to_executable(&world, root, output).expect("compilation failed");
+    codegen::compile_to_executable(&world, root, output, cli.opt_level.into())
+        .expect("compilation failed");
 
     println!("Compiled {} -> {output}", cli.file.display());
 }

@@ -16,6 +16,24 @@ use target_lexicon::Triple;
 
 use crate::ast::{AstWorld, BinOp, NodeId, NodeKind};
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum OptLevel {
+    #[default]
+    None,
+    Speed,
+    SpeedAndSize,
+}
+
+impl OptLevel {
+    fn as_cranelift_str(self) -> &'static str {
+        match self {
+            OptLevel::None => "none",
+            OptLevel::Speed => "speed",
+            OptLevel::SpeedAndSize => "speed_and_size",
+        }
+    }
+}
+
 const RUNTIME_C: &str = r#"
 #include <stdio.h>
 void print_int(long n) { printf("%ld\n", n); }
@@ -70,9 +88,10 @@ impl FnCtx {
 }
 
 impl<'a, 'arena> Compiler<'a, 'arena> {
-    fn new(world: &'a AstWorld<'arena>) -> Result<Self, Box<dyn Error>> {
+    fn new(world: &'a AstWorld<'arena>, opt_level: OptLevel) -> Result<Self, Box<dyn Error>> {
         let mut flag_builder = settings::builder();
         flag_builder.set("is_pic", "true")?;
+        flag_builder.set("opt_level", opt_level.as_cranelift_str())?;
         let isa_builder = isa::lookup(Triple::host())?;
         let isa = isa_builder.finish(settings::Flags::new(flag_builder))?;
 
@@ -763,7 +782,8 @@ pub fn compile_to_executable(
     world: &AstWorld<'_>,
     root: NodeId,
     output_path: &str,
+    opt_level: OptLevel,
 ) -> Result<(), Box<dyn Error>> {
-    let compiler = Compiler::new(world)?;
+    let compiler = Compiler::new(world, opt_level)?;
     compiler.compile(root, output_path)
 }

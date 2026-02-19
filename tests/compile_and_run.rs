@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use bumpalo::Bump;
-use ecsast::codegen;
+use ecsast::codegen::{self, OptLevel};
 use ecsast::lexer::Lexer;
 use ecsast::parser::Parser;
 use tempfile::TempDir;
@@ -29,7 +29,7 @@ fn run_program_test_with_args(name: &str, args: &[&str]) {
     let output_path = tmp_dir.path().join("output");
     let output_str = output_path.to_str().expect("non-UTF8 temp path");
 
-    codegen::compile_to_executable(&world, root, output_str).expect("compilation failed");
+    codegen::compile_to_executable(&world, root, output_str, OptLevel::None).expect("compilation failed");
 
     let result = Command::new(&output_path)
         .args(args)
