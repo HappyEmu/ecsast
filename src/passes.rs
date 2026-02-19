@@ -11,11 +11,11 @@ pub fn annotate_literal_types(world: &mut AstWorld<'_>) {
     let ids: Vec<NodeId> = world.kinds.keys().copied().collect();
     for id in ids {
         let ty = match &world.kinds[&id] {
-            NodeKind::IntLit(_)    => Some(TypeInfo::Int),
-            NodeKind::FloatLit(_)  => Some(TypeInfo::Float),
-            NodeKind::BoolLit(_)   => Some(TypeInfo::Bool),
+            NodeKind::IntLit(_) => Some(TypeInfo::Int),
+            NodeKind::FloatLit(_) => Some(TypeInfo::Float),
+            NodeKind::BoolLit(_) => Some(TypeInfo::Bool),
             NodeKind::StringLit(_) => Some(TypeInfo::Str),
-            _                      => None,
+            _ => None,
         };
         if let Some(t) = ty {
             world.types.insert(id, t);
@@ -39,7 +39,12 @@ pub fn compute_parents(world: &mut AstWorld<'_>, id: NodeId, parent: Option<Node
     // NodeKind is Copy, so *world.kind(id) gives an owned copy with no clone.
     let children: Vec<NodeId> = match *world.kind(id) {
         NodeKind::Program(items) => items.to_vec(),
-        NodeKind::FnDecl { params, ret_ty, body, .. } => {
+        NodeKind::FnDecl {
+            params,
+            ret_ty,
+            body,
+            ..
+        } => {
             let mut ch: Vec<_> = params.to_vec();
             ch.extend(ret_ty);
             ch.push(body);
@@ -50,7 +55,11 @@ pub fn compute_parents(world: &mut AstWorld<'_>, id: NodeId, parent: Option<Node
         NodeKind::LetStmt { ty, init, .. } => ty.into_iter().chain(init).collect(),
         NodeKind::AssignStmt { target, value } => vec![target, value],
         NodeKind::ReturnStmt(v) => v.into_iter().collect(),
-        NodeKind::IfStmt { cond, then_block, else_block } => {
+        NodeKind::IfStmt {
+            cond,
+            then_block,
+            else_block,
+        } => {
             let mut ch = vec![cond, then_block];
             ch.extend(else_block);
             ch

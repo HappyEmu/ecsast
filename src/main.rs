@@ -6,8 +6,8 @@ mod passes;
 mod printer;
 mod span;
 
-use bumpalo::Bump;
 use ast::NodeKind;
+use bumpalo::Bump;
 use lexer::Lexer;
 use parser::Parser;
 
@@ -56,11 +56,31 @@ fn main() {
 
     // ---- Component store statistics ----------------------------------------
     println!("\n=== Component store population ===");
-    println!("  kinds    (always full): {}/{}", world.kinds.len(), world.kinds.len());
-    println!("  spans    (always full): {}/{}", world.spans.len(), world.kinds.len());
-    println!("  types    (lazy — only literals): {}/{}", world.types.len(), world.kinds.len());
-    println!("  parents  (lazy — all but root):  {}/{}", world.parents.len(), world.kinds.len());
-    println!("  resolved (lazy — not computed):  {}/{}", world.resolved.len(), world.kinds.len());
+    println!(
+        "  kinds    (always full): {}/{}",
+        world.kinds.len(),
+        world.kinds.len()
+    );
+    println!(
+        "  spans    (always full): {}/{}",
+        world.spans.len(),
+        world.kinds.len()
+    );
+    println!(
+        "  types    (lazy — only literals): {}/{}",
+        world.types.len(),
+        world.kinds.len()
+    );
+    println!(
+        "  parents  (lazy — all but root):  {}/{}",
+        world.parents.len(),
+        world.kinds.len()
+    );
+    println!(
+        "  resolved (lazy — not computed):  {}/{}",
+        world.resolved.len(),
+        world.kinds.len()
+    );
 
     // ---- Interpreter -------------------------------------------------------
     println!("\n=== Interpreter output ===");
@@ -69,7 +89,11 @@ fn main() {
 
     // ---- Spot-check: walk up from a known node -----------------------------
     // Find the first IntLit and walk its parent chain to root.
-    if let Some((&int_node, _)) = world.kinds.iter().find(|(_, k)| matches!(k, NodeKind::IntLit(_))) {
+    if let Some((&int_node, _)) = world
+        .kinds
+        .iter()
+        .find(|(_, k)| matches!(k, NodeKind::IntLit(_)))
+    {
         print!("\nParent chain from {int_node:?}: ");
         let mut cur = int_node;
         loop {

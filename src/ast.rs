@@ -27,21 +27,53 @@ pub enum NodeKind<'arena> {
 
     // Expressions
     Ident(&'arena str),
-    BinOp { op: BinOp, lhs: NodeId, rhs: NodeId },
-    UnaryOp { op: UnaryOp, operand: NodeId },
-    Call { callee: NodeId, args: &'arena [NodeId] },
+    BinOp {
+        op: BinOp,
+        lhs: NodeId,
+        rhs: NodeId,
+    },
+    UnaryOp {
+        op: UnaryOp,
+        operand: NodeId,
+    },
+    Call {
+        callee: NodeId,
+        args: &'arena [NodeId],
+    },
 
     // Statements
-    LetStmt { name: &'arena str, ty: Option<NodeId>, init: Option<NodeId> },
-    AssignStmt { target: NodeId, value: NodeId },
+    LetStmt {
+        name: &'arena str,
+        ty: Option<NodeId>,
+        init: Option<NodeId>,
+    },
+    AssignStmt {
+        target: NodeId,
+        value: NodeId,
+    },
     ReturnStmt(Option<NodeId>),
-    IfStmt { cond: NodeId, then_block: NodeId, else_block: Option<NodeId> },
-    WhileStmt { cond: NodeId, body: NodeId },
+    IfStmt {
+        cond: NodeId,
+        then_block: NodeId,
+        else_block: Option<NodeId>,
+    },
+    WhileStmt {
+        cond: NodeId,
+        body: NodeId,
+    },
     Block(&'arena [NodeId]),
 
     // Items
-    FnDecl { name: &'arena str, params: &'arena [NodeId], ret_ty: Option<NodeId>, body: NodeId },
-    Param { name: &'arena str, ty: Option<NodeId> },
+    FnDecl {
+        name: &'arena str,
+        params: &'arena [NodeId],
+        ret_ty: Option<NodeId>,
+        body: NodeId,
+    },
+    Param {
+        name: &'arena str,
+        ty: Option<NodeId>,
+    },
 
     // Types
     TypeName(&'arena str),
@@ -86,7 +118,10 @@ pub enum TypeInfo {
     Bool,
     Str,
     Unit,
-    Fn { params: Vec<TypeInfo>, ret: Box<TypeInfo> },
+    Fn {
+        params: Vec<TypeInfo>,
+        ret: Box<TypeInfo>,
+    },
     Unknown,
 }
 

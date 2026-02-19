@@ -17,7 +17,12 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
                 print_ast(world, item, indent + 1);
             }
         }
-        NodeKind::FnDecl { name, params, ret_ty, body } => {
+        NodeKind::FnDecl {
+            name,
+            params,
+            ret_ty,
+            body,
+        } => {
             println!("{pad}FnDecl `{name}` [{s}..{e}]", s = sp.start, e = sp.end);
             for &p in *params {
                 print_ast(world, p, indent + 1);
@@ -39,7 +44,11 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
                 print_ast(world, stmt, indent + 1);
             }
         }
-        NodeKind::LetStmt { name, ty: ty_node, init } => {
+        NodeKind::LetStmt {
+            name,
+            ty: ty_node,
+            init,
+        } => {
             println!("{pad}Let `{name}` [{s}..{e}]", s = sp.start, e = sp.end);
             if let Some(t) = ty_node {
                 print_ast(world, *t, indent + 1);
@@ -59,7 +68,11 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
                 print_ast(world, *v, indent + 1);
             }
         }
-        NodeKind::IfStmt { cond, then_block, else_block } => {
+        NodeKind::IfStmt {
+            cond,
+            then_block,
+            else_block,
+        } => {
             println!("{pad}If [{s}..{e}]", s = sp.start, e = sp.end);
             print_ast(world, *cond, indent + 1);
             print_ast(world, *then_block, indent + 1);
@@ -88,11 +101,29 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
                 print_ast(world, a, indent + 1);
             }
         }
-        NodeKind::IntLit(n)      => println!("{pad}IntLit({n}){ty} [{s}..{e}]", s = sp.start, e = sp.end),
-        NodeKind::FloatLit(f)    => println!("{pad}FloatLit({f}){ty} [{s}..{e}]", s = sp.start, e = sp.end),
-        NodeKind::BoolLit(b)     => println!("{pad}BoolLit({b}){ty} [{s}..{e}]", s = sp.start, e = sp.end),
-        NodeKind::StringLit(s)   => println!("{pad}StringLit({s:?}){ty} [{st}..{e}]", st = sp.start, e = sp.end),
-        NodeKind::Ident(name)    => println!("{pad}Ident(`{name}`){ty} [{s}..{e}]", s = sp.start, e = sp.end),
-        NodeKind::TypeName(name) => println!("{pad}Type(`{name}`) [{s}..{e}]", s = sp.start, e = sp.end),
+        NodeKind::IntLit(n) => {
+            println!("{pad}IntLit({n}){ty} [{s}..{e}]", s = sp.start, e = sp.end)
+        }
+        NodeKind::FloatLit(f) => println!(
+            "{pad}FloatLit({f}){ty} [{s}..{e}]",
+            s = sp.start,
+            e = sp.end
+        ),
+        NodeKind::BoolLit(b) => {
+            println!("{pad}BoolLit({b}){ty} [{s}..{e}]", s = sp.start, e = sp.end)
+        }
+        NodeKind::StringLit(s) => println!(
+            "{pad}StringLit({s:?}){ty} [{st}..{e}]",
+            st = sp.start,
+            e = sp.end
+        ),
+        NodeKind::Ident(name) => println!(
+            "{pad}Ident(`{name}`){ty} [{s}..{e}]",
+            s = sp.start,
+            e = sp.end
+        ),
+        NodeKind::TypeName(name) => {
+            println!("{pad}Type(`{name}`) [{s}..{e}]", s = sp.start, e = sp.end)
+        }
     }
 }

@@ -19,11 +19,11 @@ pub enum Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Int(n)   => write!(f, "{n}"),
+            Value::Int(n) => write!(f, "{n}"),
             Value::Float(x) => write!(f, "{x}"),
-            Value::Bool(b)  => write!(f, "{b}"),
-            Value::Str(s)   => write!(f, "{s}"),
-            Value::Unit     => write!(f, "()"),
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Str(s) => write!(f, "{s}"),
+            Value::Unit => write!(f, "()"),
         }
     }
 }
@@ -63,7 +63,10 @@ impl Env {
     }
 
     fn define(&mut self, name: &str, value: Value) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), value);
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), value);
     }
 
     fn get(&self, name: &str) -> Value {
@@ -99,15 +102,16 @@ pub fn run_program(world: &AstWorld<'_>, root: NodeId) -> Value {
         _ => panic!("root must be a Program node"),
     };
     for item in items.iter().copied() {
-        if let NodeKind::FnDecl { name, params, body, .. } = world.kind(item) {
+        if let NodeKind::FnDecl {
+            name, params, body, ..
+        } = world.kind(item)
+        {
             env.fns.insert(name.to_string(), (params.to_vec(), *body));
         }
     }
 
     // Look up and call main
-    let (params, body) = env.fns.get("main")
-        .expect("no main function found")
-        .clone();
+    let (params, body) = env.fns.get("main").expect("no main function found").clone();
     assert!(params.is_empty(), "main must take no parameters");
 
     match eval_block(world, body, &mut env) {
@@ -121,21 +125,27 @@ pub fn run_program(world: &AstWorld<'_>, root: NodeId) -> Value {
 
 fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env) -> Flow {
     match *world.kind(id) {
-        NodeKind::IntLit(n)    => Flow::Val(Value::Int(n)),
-        NodeKind::FloatLit(f)  => Flow::Val(Value::Float(f)),
-        NodeKind::BoolLit(b)   => Flow::Val(Value::Bool(b)),
+        NodeKind::IntLit(n) => Flow::Val(Value::Int(n)),
+        NodeKind::FloatLit(f) => Flow::Val(Value::Float(f)),
+        NodeKind::BoolLit(b) => Flow::Val(Value::Bool(b)),
         NodeKind::StringLit(s) => Flow::Val(Value::Str(s.to_string())),
 
         NodeKind::Ident(name) => Flow::Val(env.get(name)),
 
         NodeKind::BinOp { op, lhs, rhs } => {
-            let l = match eval(world, lhs, env) { Flow::Val(v) | Flow::Ret(v) => v };
-            let r = match eval(world, rhs, env) { Flow::Val(v) | Flow::Ret(v) => v };
+            let l = match eval(world, lhs, env) {
+                Flow::Val(v) | Flow::Ret(v) => v,
+            };
+            let r = match eval(world, rhs, env) {
+                Flow::Val(v) | Flow::Ret(v) => v,
+            };
             Flow::Val(apply_binop(op, l, r))
         }
 
         NodeKind::UnaryOp { op, operand } => {
-            let v = match eval(world, operand, env) { Flow::Val(v) | Flow::Ret(v) => v };
+            let v = match eval(world, operand, env) {
+                Flow::Val(v) | Flow::Ret(v) => v,
+            };
             Flow::Val(apply_unary(op, v))
         }
 
@@ -149,19 +159,26 @@ fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env) -> Flow {
             // Evaluate arguments
             let mut arg_vals = Vec::new();
             for &a in args {
-                let v = match eval(world, a, env) { Flow::Val(v) | Flow::Ret(v) => v };
+                let v = match eval(world, a, env) {
+                    Flow::Val(v) | Flow::Ret(v) => v,
+                };
                 arg_vals.push(v);
             }
 
             // Built-in: print
             if fn_name == "print" {
-                let s = arg_vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+                let s = arg_vals
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("{s}");
                 return Flow::Val(Value::Unit);
             }
 
             // User-defined function
-            let (param_ids, body) = env.fns
+            let (param_ids, body) = env
+                .fns
                 .get(fn_name)
                 .unwrap_or_else(|| panic!("undefined function: {fn_name}"))
                 .clone();
@@ -213,15 +230,19 @@ fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env) -> Flow {
             Flow::Ret(val)
         }
 
-        NodeKind::IfStmt { cond, then_block, else_block } => {
+        NodeKind::IfStmt {
+            cond,
+            then_block,
+            else_block,
+        } => {
             let cond_val = match eval(world, cond, env) {
                 Flow::Val(v) | Flow::Ret(v) => v,
             };
             match cond_val {
-                Value::Bool(true)  => eval(world, then_block, env),
+                Value::Bool(true) => eval(world, then_block, env),
                 Value::Bool(false) => match else_block {
                     Some(eb) => eval(world, eb, env),
-                    None     => Flow::Val(Value::Unit),
+                    None => Flow::Val(Value::Unit),
                 },
                 _ => panic!("if condition must be a boolean"),
             }
@@ -234,12 +255,10 @@ fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env) -> Flow {
                 };
                 match cond_val {
                     Value::Bool(false) => break,
-                    Value::Bool(true)  => {
-                        match eval_block(world, body, env) {
-                            Flow::Val(_)    => {}
-                            Flow::Ret(v)    => return Flow::Ret(v),
-                        }
-                    }
+                    Value::Bool(true) => match eval_block(world, body, env) {
+                        Flow::Val(_) => {}
+                        Flow::Ret(v) => return Flow::Ret(v),
+                    },
                     _ => panic!("while condition must be a boolean"),
                 }
             }
@@ -310,7 +329,7 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         (BinOp::Ne, Value::Bool(a), Value::Bool(b)) => Value::Bool(a != b),
         // Logical
         (BinOp::And, Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
-        (BinOp::Or,  Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
+        (BinOp::Or, Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
         // String concat
         (BinOp::Add, Value::Str(a), Value::Str(b)) => Value::Str(a + &b),
         // Type error
@@ -320,9 +339,9 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
 
 fn apply_unary(op: UnaryOp, v: Value) -> Value {
     match (op, v) {
-        (UnaryOp::Neg, Value::Int(n))   => Value::Int(-n),
+        (UnaryOp::Neg, Value::Int(n)) => Value::Int(-n),
         (UnaryOp::Neg, Value::Float(f)) => Value::Float(-f),
-        (UnaryOp::Not, Value::Bool(b))  => Value::Bool(!b),
+        (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
         (op, v) => panic!("type error: cannot apply {op:?} to {v:?}"),
     }
 }

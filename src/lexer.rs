@@ -43,7 +43,7 @@ pub enum TokenKind {
 
     // Assignment / punctuation
     Eq,
-    Arrow,    // ->
+    Arrow, // ->
     Colon,
     Comma,
     Semicolon,
@@ -140,54 +140,121 @@ impl<'a> Lexer<'a> {
 
     fn lex_one(&mut self, first: char) -> TokenKind {
         match first {
-            '+' => { self.advance(); TokenKind::Plus }
+            '+' => {
+                self.advance();
+                TokenKind::Plus
+            }
             '-' => {
                 self.advance();
-                if self.peek() == Some('>') { self.advance(); TokenKind::Arrow }
-                else { TokenKind::Minus }
+                if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::Arrow
+                } else {
+                    TokenKind::Minus
+                }
             }
-            '*' => { self.advance(); TokenKind::Star }
-            '/' => { self.advance(); TokenKind::Slash }
-            '%' => { self.advance(); TokenKind::Percent }
+            '*' => {
+                self.advance();
+                TokenKind::Star
+            }
+            '/' => {
+                self.advance();
+                TokenKind::Slash
+            }
+            '%' => {
+                self.advance();
+                TokenKind::Percent
+            }
             '=' => {
                 self.advance();
-                if self.peek() == Some('=') { self.advance(); TokenKind::EqEq }
-                else { TokenKind::Eq }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::EqEq
+                } else {
+                    TokenKind::Eq
+                }
             }
             '!' => {
                 self.advance();
-                if self.peek() == Some('=') { self.advance(); TokenKind::BangEq }
-                else { TokenKind::Bang }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::BangEq
+                } else {
+                    TokenKind::Bang
+                }
             }
             '<' => {
                 self.advance();
-                if self.peek() == Some('=') { self.advance(); TokenKind::LtEq }
-                else { TokenKind::Lt }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::LtEq
+                } else {
+                    TokenKind::Lt
+                }
             }
             '>' => {
                 self.advance();
-                if self.peek() == Some('=') { self.advance(); TokenKind::GtEq }
-                else { TokenKind::Gt }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::GtEq
+                } else {
+                    TokenKind::Gt
+                }
             }
             '&' => {
                 self.advance();
-                if self.peek() == Some('&') { self.advance(); TokenKind::AmpAmp }
-                else { panic!("unexpected lone '&' at byte {}", self.pos) }
+                if self.peek() == Some('&') {
+                    self.advance();
+                    TokenKind::AmpAmp
+                } else {
+                    panic!("unexpected lone '&' at byte {}", self.pos)
+                }
             }
             '|' => {
                 self.advance();
-                if self.peek() == Some('|') { self.advance(); TokenKind::PipePipe }
-                else { panic!("unexpected lone '|' at byte {}", self.pos) }
+                if self.peek() == Some('|') {
+                    self.advance();
+                    TokenKind::PipePipe
+                } else {
+                    panic!("unexpected lone '|' at byte {}", self.pos)
+                }
             }
-            ':' => { self.advance(); TokenKind::Colon }
-            ',' => { self.advance(); TokenKind::Comma }
-            ';' => { self.advance(); TokenKind::Semicolon }
-            '(' => { self.advance(); TokenKind::LParen }
-            ')' => { self.advance(); TokenKind::RParen }
-            '{' => { self.advance(); TokenKind::LBrace }
-            '}' => { self.advance(); TokenKind::RBrace }
-            '[' => { self.advance(); TokenKind::LBracket }
-            ']' => { self.advance(); TokenKind::RBracket }
+            ':' => {
+                self.advance();
+                TokenKind::Colon
+            }
+            ',' => {
+                self.advance();
+                TokenKind::Comma
+            }
+            ';' => {
+                self.advance();
+                TokenKind::Semicolon
+            }
+            '(' => {
+                self.advance();
+                TokenKind::LParen
+            }
+            ')' => {
+                self.advance();
+                TokenKind::RParen
+            }
+            '{' => {
+                self.advance();
+                TokenKind::LBrace
+            }
+            '}' => {
+                self.advance();
+                TokenKind::RBrace
+            }
+            '[' => {
+                self.advance();
+                TokenKind::LBracket
+            }
+            ']' => {
+                self.advance();
+                TokenKind::RBracket
+            }
             '"' => self.lex_string(),
             c if c.is_ascii_digit() => self.lex_number(),
             c if c.is_alphabetic() || c == '_' => self.lex_ident_or_keyword(),
@@ -238,15 +305,15 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
         match &self.src[start..self.pos] {
-            "fn"     => TokenKind::Fn,
-            "let"    => TokenKind::Let,
-            "if"     => TokenKind::If,
-            "else"   => TokenKind::Else,
-            "while"  => TokenKind::While,
+            "fn" => TokenKind::Fn,
+            "let" => TokenKind::Let,
+            "if" => TokenKind::If,
+            "else" => TokenKind::Else,
+            "while" => TokenKind::While,
             "return" => TokenKind::Return,
-            "true"   => TokenKind::Bool(true),
-            "false"  => TokenKind::Bool(false),
-            word     => TokenKind::Ident(word.to_string()),
+            "true" => TokenKind::Bool(true),
+            "false" => TokenKind::Bool(false),
+            word => TokenKind::Ident(word.to_string()),
         }
     }
 }
