@@ -55,3 +55,8 @@ fn hello() {
 fn arithmetic() {
     run_program_test("arithmetic");
 }
+
+#[test]
+fn precedence() {
+    run_program_test("precedence");
+}

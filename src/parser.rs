@@ -942,6 +942,210 @@ mod tests {
         assert!(matches!(*world.kind(operand), NodeKind::BoolLit(true)));
     }
 
+    #[test]
+    fn parenthesized_override_precedence() {
+        // `(2 + 3) * 4` must parse as Mul(Add(2, 3), 4)
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = (2 + 3) * 4; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Mul,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Mul")
+        };
+        // lhs should be Add(2, 3)
+        let NodeKind::BinOp {
+            op: BinOp::Add,
+            lhs: l2,
+            rhs: r2,
+        } = *world.kind(lhs)
+        else {
+            panic!("expected inner Add")
+        };
+        assert!(matches!(*world.kind(l2), NodeKind::IntLit(2)));
+        assert!(matches!(*world.kind(r2), NodeKind::IntLit(3)));
+        assert!(matches!(*world.kind(rhs), NodeKind::IntLit(4)));
+    }
+
+    #[test]
+    fn nested_parentheses() {
+        // `((1 + 2)) * 3` — double parens should be transparent
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = ((1 + 2)) * 3; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Mul,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Mul")
+        };
+        assert!(matches!(
+            *world.kind(lhs),
+            NodeKind::BinOp {
+                op: BinOp::Add,
+                ..
+            }
+        ));
+        assert!(matches!(*world.kind(rhs), NodeKind::IntLit(3)));
+    }
+
+    #[test]
+    fn precedence_sub_and_div() {
+        // `10 - 6 / 2` must parse as `10 - (6 / 2)`
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = 10 - 6 / 2; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Sub,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Sub")
+        };
+        assert!(matches!(*world.kind(lhs), NodeKind::IntLit(10)));
+        let NodeKind::BinOp {
+            op: BinOp::Div,
+            lhs: l2,
+            rhs: r2,
+        } = *world.kind(rhs)
+        else {
+            panic!("expected inner Div")
+        };
+        assert!(matches!(*world.kind(l2), NodeKind::IntLit(6)));
+        assert!(matches!(*world.kind(r2), NodeKind::IntLit(2)));
+    }
+
+    #[test]
+    fn precedence_mod_same_as_mul() {
+        // `2 + 10 % 3` must parse as `2 + (10 % 3)`
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = 2 + 10 % 3; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Add,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Add")
+        };
+        assert!(matches!(*world.kind(lhs), NodeKind::IntLit(2)));
+        assert!(matches!(
+            *world.kind(rhs),
+            NodeKind::BinOp {
+                op: BinOp::Mod,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn left_associativity() {
+        // `8 - 3 - 2` must parse as `(8 - 3) - 2` (left-assoc)
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = 8 - 3 - 2; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Sub,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Sub")
+        };
+        // rhs is the rightmost operand
+        assert!(matches!(*world.kind(rhs), NodeKind::IntLit(2)));
+        // lhs is (8 - 3)
+        let NodeKind::BinOp {
+            op: BinOp::Sub,
+            lhs: l2,
+            rhs: r2,
+        } = *world.kind(lhs)
+        else {
+            panic!("expected inner Sub")
+        };
+        assert!(matches!(*world.kind(l2), NodeKind::IntLit(8)));
+        assert!(matches!(*world.kind(r2), NodeKind::IntLit(3)));
+    }
+
+    #[test]
+    fn parenthesized_both_sides() {
+        // `(2 + 3) * (4 - 1)` — both sides parenthesized
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = (2 + 3) * (4 - 1); }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Mul,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected Mul at top")
+        };
+        assert!(matches!(
+            *world.kind(lhs),
+            NodeKind::BinOp {
+                op: BinOp::Add,
+                ..
+            }
+        ));
+        assert!(matches!(
+            *world.kind(rhs),
+            NodeKind::BinOp {
+                op: BinOp::Sub,
+                ..
+            }
+        ));
+    }
+
     // --- calls ---
 
     #[test]
