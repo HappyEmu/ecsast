@@ -1,9 +1,12 @@
 mod ast;
 mod codegen;
+#[allow(dead_code)]
 mod interpreter;
 mod lexer;
 mod parser;
+#[allow(dead_code)]
 mod passes;
+#[allow(dead_code)]
 mod printer;
 mod span;
 

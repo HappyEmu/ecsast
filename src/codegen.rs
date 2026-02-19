@@ -313,14 +313,14 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     ) -> FnCtx {
         let print_int_ref = self
             .module
-            .declare_func_in_func(self.print_int_id, &mut builder.func);
+            .declare_func_in_func(self.print_int_id, builder.func);
         let print_str_ref = self
             .module
-            .declare_func_in_func(self.print_str_id, &mut builder.func);
+            .declare_func_in_func(self.print_str_id, builder.func);
 
         let mut func_refs = HashMap::new();
         for (name, &fid) in &self.user_funcs {
-            let fref = self.module.declare_func_in_func(fid, &mut builder.func);
+            let fref = self.module.declare_func_in_func(fid, builder.func);
             func_refs.insert(name.clone(), fref);
         }
 
@@ -503,7 +503,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     let (data_id, len) = self.get_or_create_string_data(&s);
                     let gv = self
                         .module
-                        .declare_data_in_func(data_id, &mut builder.func);
+                        .declare_data_in_func(data_id, builder.func);
                     let ptr = builder.ins().symbol_value(
                         self.module.target_config().pointer_type(),
                         gv,

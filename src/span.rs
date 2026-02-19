@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// A half-open byte range `[start, end)` within a source string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Span {
