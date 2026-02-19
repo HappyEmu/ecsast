@@ -1,0 +1,20 @@
+fn main() {
+    print("=== AND ===");
+    print(true && true);
+    print(true && false);
+    print(false && true);
+    print(false && false);
+    print("=== OR ===");
+    print(true || true);
+    print(true || false);
+    print(false || true);
+    print(false || false);
+    print("=== NOT ===");
+    print(!true);
+    print(!false);
+    print("=== comparisons in logic ===");
+    print(3 > 1 && 5 > 2);
+    print(3 > 1 && 5 < 2);
+    print(1 == 1 || 2 == 3);
+    print(1 != 1 || 2 == 3);
+}

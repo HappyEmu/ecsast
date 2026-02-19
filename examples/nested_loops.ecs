@@ -1,0 +1,13 @@
+fn main() {
+    let total: int = 0;
+    let i: int = 1;
+    while i <= 5 {
+        let j: int = 1;
+        while j <= i {
+            total = total + j;
+            j = j + 1;
+        }
+        print(total);
+        i = i + 1;
+    }
+}

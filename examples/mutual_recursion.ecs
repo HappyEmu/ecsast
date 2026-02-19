@@ -1,0 +1,26 @@
+fn is_even(n: int) -> int {
+    if n == 0 {
+        return 1;
+    }
+    return is_odd(n - 1);
+}
+
+fn is_odd(n: int) -> int {
+    if n == 0 {
+        return 0;
+    }
+    return is_even(n - 1);
+}
+
+fn main() {
+    print("is_even(0) =");
+    print(is_even(0));
+    print("is_even(1) =");
+    print(is_even(1));
+    print("is_even(4) =");
+    print(is_even(4));
+    print("is_odd(3) =");
+    print(is_odd(3));
+    print("is_odd(6) =");
+    print(is_odd(6));
+}
