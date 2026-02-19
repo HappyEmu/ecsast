@@ -1,0 +1,8 @@
+fn main() {
+    let count: int = argc();
+    let i: int = 0;
+    while i < count {
+        print(arg(i));
+        i = i + 1;
+    }
+}

@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::process::Command;
 
-use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, UserFuncName};
+use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, StackSlotData, StackSlotKind, UserFuncName};
 use cranelift_codegen::ir::{condcodes::IntCC, FuncRef, Value};
 use cranelift_codegen::isa;
 use cranelift_codegen::settings::{self, Configurable};
@@ -20,6 +20,15 @@ const RUNTIME_C: &str = r#"
 #include <stdio.h>
 void print_int(long n) { printf("%ld\n", n); }
 void print_str(const char *s, long len) { fwrite(s, 1, len, stdout); fputc('\n', stdout); }
+static int g_argc;
+static char **g_argv;
+void ecsast_init_args(int argc, char **argv) { g_argc = argc; g_argv = argv; }
+long ecsast_argc(void) { return g_argc; }
+void ecsast_arg(long i, const char **out_ptr, long *out_len) {
+    *out_ptr = g_argv[i];
+    long len = 0; while (g_argv[i][len]) len++;
+    *out_len = len;
+}
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +42,9 @@ struct Compiler<'a, 'arena> {
     module: ObjectModule,
     print_int_id: FuncId,
     print_str_id: FuncId,
+    init_args_id: FuncId,
+    argc_id: FuncId,
+    arg_id: FuncId,
     user_funcs: HashMap<String, FuncId>,
     string_data: HashMap<String, (DataId, usize)>,
 }
@@ -42,6 +54,9 @@ struct FnCtx {
     next_var: usize,
     print_int_ref: FuncRef,
     print_str_ref: FuncRef,
+    init_args_ref: FuncRef,
+    argc_ref: FuncRef,
+    arg_ref: FuncRef,
     func_refs: HashMap<String, FuncRef>,
     return_type: Option<ValType>,
 }
@@ -83,11 +98,36 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         let print_str_id =
             module.declare_function("print_str", Linkage::Import, &print_str_sig)?;
 
+        // Declare ecsast_init_args(i32, ptr) -> void
+        let mut init_args_sig = module.make_signature();
+        init_args_sig.params.push(AbiParam::new(types::I32));
+        init_args_sig
+            .params
+            .push(AbiParam::new(module.target_config().pointer_type()));
+        let init_args_id =
+            module.declare_function("ecsast_init_args", Linkage::Import, &init_args_sig)?;
+
+        // Declare ecsast_argc() -> i64
+        let mut argc_sig = module.make_signature();
+        argc_sig.returns.push(AbiParam::new(types::I64));
+        let argc_id = module.declare_function("ecsast_argc", Linkage::Import, &argc_sig)?;
+
+        // Declare ecsast_arg(i64, ptr, ptr) -> void
+        let ptr_type = module.target_config().pointer_type();
+        let mut arg_sig = module.make_signature();
+        arg_sig.params.push(AbiParam::new(types::I64));
+        arg_sig.params.push(AbiParam::new(ptr_type));
+        arg_sig.params.push(AbiParam::new(ptr_type));
+        let arg_id = module.declare_function("ecsast_arg", Linkage::Import, &arg_sig)?;
+
         Ok(Self {
             world,
             module,
             print_int_id,
             print_str_id,
+            init_args_id,
+            argc_id,
+            arg_id,
             user_funcs: HashMap::new(),
             string_data: HashMap::new(),
         })
@@ -224,7 +264,10 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         items: &[NodeId],
         func_ctx: &mut FunctionBuilderContext,
     ) -> Result<(), Box<dyn Error>> {
+        let ptr_type = self.module.target_config().pointer_type();
         let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // argc
+        sig.params.push(AbiParam::new(ptr_type)); // argv
         sig.returns.push(AbiParam::new(types::I32));
         let main_func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
 
@@ -237,6 +280,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             builder.seal_block(entry);
 
             let mut fn_ctx = self.make_fn_ctx(&mut builder, items, None);
+
+            // Call ecsast_init_args(argc, argv) at entry
+            let argc_param = builder.block_params(entry)[0];
+            let argv_param = builder.block_params(entry)[1];
+            builder
+                .ins()
+                .call(fn_ctx.init_args_ref, &[argc_param, argv_param]);
 
             let terminated = self.compile_block(body, &mut builder, &mut fn_ctx);
 
@@ -317,6 +367,15 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         let print_str_ref = self
             .module
             .declare_func_in_func(self.print_str_id, builder.func);
+        let init_args_ref = self
+            .module
+            .declare_func_in_func(self.init_args_id, builder.func);
+        let argc_ref = self
+            .module
+            .declare_func_in_func(self.argc_id, builder.func);
+        let arg_ref = self
+            .module
+            .declare_func_in_func(self.arg_id, builder.func);
 
         let mut func_refs = HashMap::new();
         for (name, &fid) in &self.user_funcs {
@@ -329,6 +388,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             next_var: 0,
             print_int_ref,
             print_str_ref,
+            init_args_ref,
+            argc_ref,
+            arg_ref,
             func_refs,
             return_type,
         }
@@ -496,7 +558,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
         if fn_name == "print" {
             assert!(args.len() == 1, "print() takes exactly 1 argument");
-            // Check if the argument is a string literal
+            // Check if the argument is a string literal or arg() call
             match self.world.kind(args[0]) {
                 NodeKind::StringLit(s) => {
                     let s = s.to_string();
@@ -511,6 +573,56 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     let len_val = builder.ins().iconst(types::I64, len as i64);
                     builder.ins().call(fn_ctx.print_str_ref, &[ptr, len_val]);
                 }
+                NodeKind::Call { callee, args: inner_args } => {
+                    let inner_name = match self.world.kind(*callee) {
+                        NodeKind::Ident(n) => *n,
+                        _ => panic!("callee must be an identifier"),
+                    };
+                    if inner_name == "arg" {
+                        assert!(inner_args.len() == 1, "arg() takes exactly 1 argument");
+                        let (idx_val, idx_ty) = self.compile_expr(inner_args[0], builder, fn_ctx);
+                        let idx_i64 = self.coerce(idx_val, idx_ty, ValType::I64, builder);
+
+                        let ptr_type = self.module.target_config().pointer_type();
+                        let ptr_size = ptr_type.bytes();
+
+                        // Allocate stack slots for out_ptr and out_len
+                        let ptr_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            ptr_size,
+                            0,
+                        ));
+                        let len_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            8, // i64 = 8 bytes
+                            0,
+                        ));
+
+                        let ptr_addr = builder.ins().stack_addr(ptr_type, ptr_slot, 0);
+                        let len_addr = builder.ins().stack_addr(ptr_type, len_slot, 0);
+
+                        builder
+                            .ins()
+                            .call(fn_ctx.arg_ref, &[idx_i64, ptr_addr, len_addr]);
+
+                        let str_ptr =
+                            builder
+                                .ins()
+                                .stack_load(ptr_type, ptr_slot, 0);
+                        let str_len =
+                            builder
+                                .ins()
+                                .stack_load(types::I64, len_slot, 0);
+
+                        builder.ins().call(fn_ctx.print_str_ref, &[str_ptr, str_len]);
+                    } else {
+                        // Regular function call as print argument
+                        let (val, val_ty) = self.compile_call(*callee, inner_args, builder, fn_ctx)
+                            .expect("print argument call must return a value");
+                        let int_val = self.coerce(val, val_ty, ValType::I64, builder);
+                        builder.ins().call(fn_ctx.print_int_ref, &[int_val]);
+                    }
+                }
                 _ => {
                     let (val, val_ty) = self.compile_expr(args[0], builder, fn_ctx);
                     let int_val = self.coerce(val, val_ty, ValType::I64, builder);
@@ -518,6 +630,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 }
             }
             None
+        } else if fn_name == "argc" {
+            assert!(args.is_empty(), "argc() takes no arguments");
+            let call = builder.ins().call(fn_ctx.argc_ref, &[]);
+            let result = builder.inst_results(call)[0];
+            Some((result, ValType::I64))
+        } else if fn_name == "arg" {
+            panic!("arg() can only be used inside print() — the language has no string variable type yet");
         } else if let Some(&fref) = fn_ctx.func_refs.get(fn_name) {
             // User-defined function call
             let mut arg_vals = Vec::new();
