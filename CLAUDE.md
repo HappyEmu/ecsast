@@ -7,11 +7,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build          # build debug binary
 cargo build --release
-cargo test           # run all 23 parser tests
+cargo test           # run all tests (parser unit tests + end-to-end codegen tests)
 cargo test -- <name> # run a single test by name substring
-cargo run            # run main.rs (lex → parse → codegen → link → ./output)
 cargo clippy         # lint
 ```
+
+### Running the compiler
+
+The compiler accepts a `.ecs` source file as a positional argument and produces a native binary:
+
+```bash
+cargo run -- <FILE>              # compile to ./output
+cargo run -- <FILE> -o <NAME>    # compile to custom output path
+```
+
+Examples:
+
+```bash
+cargo run -- examples/hello.ecs && ./output           # prints "Hello, world!"
+cargo run -- examples/fizzbuzz.ecs -o fizz && ./fizz   # prints fizzbuzz
+```
+
+The CLI is built with `clap` (derive mode). See `src/main.rs` for the `Cli` struct.
 
 ## Architecture
 
@@ -20,7 +37,7 @@ ECSAST is a language implementation that uses an **Entity-Component-System (ECS)
 ### Pipeline
 
 ```
-Source → Lexer → Vec<Token> → Parser → AstWorld{kinds,spans} → Cranelift Codegen → Native Binary (./output)
+Source file (.ecs) → Lexer → Vec<Token> → Parser → AstWorld{kinds,spans} → Cranelift Codegen → Native Binary
 ```
 
 The interpreter (`interpreter.rs`) and passes (`passes.rs`) exist but are currently unused; `main.rs` drives the Cranelift codegen path directly.
@@ -74,7 +91,7 @@ Control flow patterns:
 - **while**: header block (sealed after back-edge) → body → back-edge jump; exit block
 - **return**: emits `return_` instruction and marks block as terminated
 
-C runtime (`RUNTIME_C`): compiled and linked automatically; provides `print_int(long)` and `print_str(const char*, long)`. Output binary is written to `./output`.
+C runtime (`RUNTIME_C`): compiled and linked automatically; provides `print_int(long)` and `print_str(const char*, long)`.
 
 ### Language Grammar
 
@@ -110,4 +127,6 @@ Supported constructs:
 
 ### Tests
 
-All tests live in `src/parser.rs` (inline `#[cfg(test)]` module). They test parse-tree structure by querying `AstWorld` after parsing.
+- **Parser unit tests** live in `src/parser.rs` (inline `#[cfg(test)]` module). They test parse-tree structure by querying `AstWorld` after parsing.
+- **End-to-end codegen tests** live in `tests/compile_and_run.rs`. They compile example programs from `tests/programs/`, run the resulting binaries, and assert on stdout output.
+- **Example programs** in `examples/` (`.ecs` files) can be compiled directly with `cargo run -- examples/<name>.ecs`.
