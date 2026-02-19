@@ -1,18 +1,7 @@
-mod ast;
-mod codegen;
-#[allow(dead_code)]
-mod interpreter;
-mod lexer;
-mod parser;
-#[allow(dead_code)]
-mod passes;
-#[allow(dead_code)]
-mod printer;
-mod span;
-
 use bumpalo::Bump;
-use lexer::Lexer;
-use parser::Parser;
+use ecsast::codegen;
+use ecsast::lexer::Lexer;
+use ecsast::parser::Parser;
 
 fn main() {
     let src = r#"
