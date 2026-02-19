@@ -8,6 +8,10 @@ use ecsast::parser::Parser;
 use tempfile::TempDir;
 
 fn run_program_test(name: &str) {
+    run_program_test_with_args(name, &[]);
+}
+
+fn run_program_test_with_args(name: &str, args: &[&str]) {
     let base = format!("tests/programs/{name}");
     let source = fs::read_to_string(format!("{base}/source.ecs"))
         .unwrap_or_else(|e| panic!("failed to read source for {name}: {e}"));
@@ -28,6 +32,7 @@ fn run_program_test(name: &str) {
     codegen::compile_to_executable(&world, root, output_str).expect("compilation failed");
 
     let result = Command::new(&output_path)
+        .args(args)
         .output()
         .expect("failed to execute compiled binary");
 
@@ -84,4 +89,9 @@ fn mutual_recursion() {
 #[test]
 fn nested_loops() {
     run_program_test("nested_loops");
+}
+
+#[test]
+fn args() {
+    run_program_test_with_args("args", &["hello", "world"]);
 }
