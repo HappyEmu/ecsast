@@ -13,7 +13,21 @@ use parser::Parser;
 
 fn main() {
     let src = r#"
+fn fibonacci(n: int) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
 fn main() {
+    let result: int = fibonacci(10);
+    let is_even: bool = result % 2 == 0;
+    print(result);
+    while result > 0 {
+        result = result - 1;
+    }
+    print("Done!");
     print(1 + 2);
 }
 "#;
