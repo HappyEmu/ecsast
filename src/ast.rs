@@ -17,37 +17,37 @@ pub struct NodeId(pub u32);
 // optional and populated lazily by later passes.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-pub enum NodeKind {
+#[derive(Clone, Copy, Debug)]
+pub enum NodeKind<'arena> {
     // Literals
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
-    StringLit(String),
+    StringLit(&'arena str),
 
     // Expressions
-    Ident(String),
+    Ident(&'arena str),
     BinOp { op: BinOp, lhs: NodeId, rhs: NodeId },
     UnaryOp { op: UnaryOp, operand: NodeId },
-    Call { callee: NodeId, args: Vec<NodeId> },
+    Call { callee: NodeId, args: &'arena [NodeId] },
 
     // Statements
-    LetStmt { name: String, ty: Option<NodeId>, init: Option<NodeId> },
+    LetStmt { name: &'arena str, ty: Option<NodeId>, init: Option<NodeId> },
     AssignStmt { target: NodeId, value: NodeId },
     ReturnStmt(Option<NodeId>),
     IfStmt { cond: NodeId, then_block: NodeId, else_block: Option<NodeId> },
     WhileStmt { cond: NodeId, body: NodeId },
-    Block(Vec<NodeId>),
+    Block(&'arena [NodeId]),
 
     // Items
-    FnDecl { name: String, params: Vec<NodeId>, ret_ty: Option<NodeId>, body: NodeId },
-    Param { name: String, ty: Option<NodeId> },
+    FnDecl { name: &'arena str, params: &'arena [NodeId], ret_ty: Option<NodeId>, body: NodeId },
+    Param { name: &'arena str, ty: Option<NodeId> },
 
     // Types
-    TypeName(String),
+    TypeName(&'arena str),
 
     // Root
-    Program(Vec<NodeId>),
+    Program(&'arena [NodeId]),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,11 +103,11 @@ pub enum TypeInfo {
 // a store independently without touching others.
 // ---------------------------------------------------------------------------
 
-pub struct AstWorld {
+pub struct AstWorld<'arena> {
     next_id: u32,
 
     // --- Eagerly populated during parsing ---
-    pub kinds: HashMap<NodeId, NodeKind>,
+    pub kinds: HashMap<NodeId, NodeKind<'arena>>,
     pub spans: HashMap<NodeId, Span>,
 
     // --- Lazily populated by later passes ---
@@ -119,7 +119,7 @@ pub struct AstWorld {
     pub resolved: HashMap<NodeId, NodeId>,
 }
 
-impl AstWorld {
+impl<'arena> AstWorld<'arena> {
     pub fn new() -> Self {
         Self {
             next_id: 0,
@@ -132,7 +132,7 @@ impl AstWorld {
     }
 
     /// Allocate a new node with a kind and source span (eagerly populated).
-    pub fn alloc(&mut self, kind: NodeKind, span: Span) -> NodeId {
+    pub fn alloc(&mut self, kind: NodeKind<'arena>, span: Span) -> NodeId {
         let id = NodeId(self.next_id);
         self.next_id += 1;
         self.kinds.insert(id, kind);
@@ -140,7 +140,7 @@ impl AstWorld {
         id
     }
 
-    pub fn kind(&self, id: NodeId) -> &NodeKind {
+    pub fn kind(&self, id: NodeId) -> &NodeKind<'arena> {
         &self.kinds[&id]
     }
 

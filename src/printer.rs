@@ -1,6 +1,6 @@
 use crate::ast::{AstWorld, NodeId, NodeKind};
 
-pub fn print_ast(world: &AstWorld, id: NodeId, indent: usize) {
+pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
     let pad = "  ".repeat(indent);
     let sp = world.span(id);
     // Show the type annotation if it has been populated by a pass.
@@ -13,13 +13,13 @@ pub fn print_ast(world: &AstWorld, id: NodeId, indent: usize) {
     match world.kind(id) {
         NodeKind::Program(items) => {
             println!("{pad}Program [{s}..{e}]", s = sp.start, e = sp.end);
-            for &item in items {
+            for &item in *items {
                 print_ast(world, item, indent + 1);
             }
         }
         NodeKind::FnDecl { name, params, ret_ty, body } => {
             println!("{pad}FnDecl `{name}` [{s}..{e}]", s = sp.start, e = sp.end);
-            for &p in params {
+            for &p in *params {
                 print_ast(world, p, indent + 1);
             }
             if let Some(ty_node) = ret_ty {
@@ -35,7 +35,7 @@ pub fn print_ast(world: &AstWorld, id: NodeId, indent: usize) {
         }
         NodeKind::Block(stmts) => {
             println!("{pad}Block [{s}..{e}]", s = sp.start, e = sp.end);
-            for &stmt in stmts {
+            for &stmt in *stmts {
                 print_ast(world, stmt, indent + 1);
             }
         }
@@ -84,7 +84,7 @@ pub fn print_ast(world: &AstWorld, id: NodeId, indent: usize) {
         NodeKind::Call { callee, args } => {
             println!("{pad}Call [{s}..{e}]", s = sp.start, e = sp.end);
             print_ast(world, *callee, indent + 1);
-            for &a in args {
+            for &a in *args {
                 print_ast(world, a, indent + 1);
             }
         }

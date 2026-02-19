@@ -7,7 +7,7 @@ use crate::ast::{AstWorld, NodeId, NodeKind, TypeInfo};
 // Leaves every other component store untouched.
 // ---------------------------------------------------------------------------
 
-pub fn annotate_literal_types(world: &mut AstWorld) {
+pub fn annotate_literal_types(world: &mut AstWorld<'_>) {
     let ids: Vec<NodeId> = world.kinds.keys().copied().collect();
     for id in ids {
         let ty = match &world.kinds[&id] {
@@ -30,22 +30,23 @@ pub fn annotate_literal_types(world: &mut AstWorld) {
 // its parent. Not needed during parsing — only computed if a consumer asks.
 // ---------------------------------------------------------------------------
 
-pub fn compute_parents(world: &mut AstWorld, id: NodeId, parent: Option<NodeId>) {
+pub fn compute_parents(world: &mut AstWorld<'_>, id: NodeId, parent: Option<NodeId>) {
     if let Some(p) = parent {
         world.parents.insert(id, p);
     }
 
     // Collect children without holding a borrow on `world`.
-    let children: Vec<NodeId> = match world.kind(id).clone() {
-        NodeKind::Program(items) => items,
+    // NodeKind is Copy, so *world.kind(id) gives an owned copy with no clone.
+    let children: Vec<NodeId> = match *world.kind(id) {
+        NodeKind::Program(items) => items.to_vec(),
         NodeKind::FnDecl { params, ret_ty, body, .. } => {
-            let mut ch: Vec<_> = params;
+            let mut ch: Vec<_> = params.to_vec();
             ch.extend(ret_ty);
             ch.push(body);
             ch
         }
         NodeKind::Param { ty, .. } => ty.into_iter().collect(),
-        NodeKind::Block(stmts) => stmts,
+        NodeKind::Block(stmts) => stmts.to_vec(),
         NodeKind::LetStmt { ty, init, .. } => ty.into_iter().chain(init).collect(),
         NodeKind::AssignStmt { target, value } => vec![target, value],
         NodeKind::ReturnStmt(v) => v.into_iter().collect(),
@@ -59,7 +60,7 @@ pub fn compute_parents(world: &mut AstWorld, id: NodeId, parent: Option<NodeId>)
         NodeKind::UnaryOp { operand, .. } => vec![operand],
         NodeKind::Call { callee, args } => {
             let mut ch = vec![callee];
-            ch.extend(args);
+            ch.extend_from_slice(args);
             ch
         }
         // Leaves

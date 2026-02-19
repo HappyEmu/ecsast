@@ -6,6 +6,7 @@ mod passes;
 mod printer;
 mod span;
 
+use bumpalo::Bump;
 use ast::NodeKind;
 use lexer::Lexer;
 use parser::Parser;
@@ -33,7 +34,8 @@ fn main() {
     let tokens = Lexer::new(src).tokenize();
 
     // ---- Parse (eagerly fills `kinds` and `spans`) -------------------------
-    let mut parser = Parser::new(&tokens);
+    let arena = Bump::new();
+    let mut parser = Parser::new(&tokens, &arena);
     let root = parser.parse_program();
     let mut world = parser.world;
 

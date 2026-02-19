@@ -1,3 +1,5 @@
+use bumpalo::Bump;
+
 use crate::ast::{AstWorld, BinOp, NodeId, NodeKind, UnaryOp};
 use crate::lexer::{Token, TokenKind};
 use crate::span::Span;
@@ -11,10 +13,11 @@ use crate::span::Span;
 // rather than one function level per precedence tier.
 // ---------------------------------------------------------------------------
 
-pub struct Parser<'src> {
+pub struct Parser<'src, 'arena> {
     tokens: &'src [Token],
     pos: usize,
-    pub world: AstWorld,
+    arena: &'arena Bump,
+    pub world: AstWorld<'arena>,
 }
 
 // ---------------------------------------------------------------------------
@@ -60,11 +63,12 @@ fn token_to_binop(kind: &TokenKind) -> BinOp {
 // Core parser helpers
 // ---------------------------------------------------------------------------
 
-impl<'src> Parser<'src> {
-    pub fn new(tokens: &'src [Token]) -> Self {
+impl<'src, 'arena> Parser<'src, 'arena> {
+    pub fn new(tokens: &'src [Token], arena: &'arena Bump) -> Self {
         Self {
             tokens,
             pos: 0,
+            arena,
             world: AstWorld::new(),
         }
     }
@@ -127,7 +131,7 @@ impl<'src> Parser<'src> {
 // Grammar
 // ---------------------------------------------------------------------------
 
-impl<'src> Parser<'src> {
+impl<'src, 'arena> Parser<'src, 'arena> {
     // ---- Top level ---------------------------------------------------------
 
     pub fn parse_program(&mut self) -> NodeId {
@@ -137,7 +141,7 @@ impl<'src> Parser<'src> {
             items.push(self.parse_item());
         }
         let end = self.start_span(); // EOF position
-        self.world.alloc(NodeKind::Program(items), Span::new(start, end))
+        self.world.alloc(NodeKind::Program(self.arena.alloc_slice_copy(&items)), Span::new(start, end))
     }
 
     fn parse_item(&mut self) -> NodeId {
@@ -154,7 +158,7 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::Fn);
 
         let name = match self.advance().kind {
-            TokenKind::Ident(s) => s,
+            TokenKind::Ident(s) => self.arena.alloc_str(&s),
             other => panic!("expected function name, got {:?}", other),
         };
 
@@ -176,13 +180,16 @@ impl<'src> Parser<'src> {
 
         let body = self.parse_block();
         let end = self.end_of(body);
-        self.world.alloc(NodeKind::FnDecl { name, params, ret_ty, body }, Span::new(start, end))
+        self.world.alloc(
+            NodeKind::FnDecl { name, params: self.arena.alloc_slice_copy(&params), ret_ty, body },
+            Span::new(start, end),
+        )
     }
 
     fn parse_param(&mut self) -> NodeId {
         let start = self.start_span();
         let name = match self.advance().kind {
-            TokenKind::Ident(s) => s,
+            TokenKind::Ident(s) => self.arena.alloc_str(&s),
             other => panic!("expected parameter name, got {:?}", other),
         };
         let ty = if self.eat(&TokenKind::Colon) {
@@ -197,7 +204,9 @@ impl<'src> Parser<'src> {
     fn parse_type(&mut self) -> NodeId {
         let tok = self.advance();
         match tok.kind {
-            TokenKind::Ident(name) => self.world.alloc(NodeKind::TypeName(name), tok.span),
+            TokenKind::Ident(name) => {
+                self.world.alloc(NodeKind::TypeName(self.arena.alloc_str(&name)), tok.span)
+            }
             other => panic!("expected type name, got {:?}", other),
         }
     }
@@ -213,7 +222,7 @@ impl<'src> Parser<'src> {
         }
         let end = self.peek_token().span.end; // end of `}`
         self.expect(&TokenKind::RBrace);
-        self.world.alloc(NodeKind::Block(stmts), Span::new(start, end))
+        self.world.alloc(NodeKind::Block(self.arena.alloc_slice_copy(&stmts)), Span::new(start, end))
     }
 
     fn parse_stmt(&mut self) -> NodeId {
@@ -231,7 +240,7 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::Let);
 
         let name = match self.advance().kind {
-            TokenKind::Ident(s) => s,
+            TokenKind::Ident(s) => self.arena.alloc_str(&s),
             other => panic!("expected name after `let`, got {:?}", other),
         };
 
@@ -403,7 +412,10 @@ impl<'src> Parser<'src> {
                 }
                 let end = self.peek_token().span.end;
                 self.expect(&TokenKind::RParen);
-                expr = self.world.alloc(NodeKind::Call { callee: expr, args }, Span::new(start, end));
+                expr = self.world.alloc(
+                    NodeKind::Call { callee: expr, args: self.arena.alloc_slice_copy(&args) },
+                    Span::new(start, end),
+                );
             } else {
                 break;
             }
@@ -418,8 +430,8 @@ impl<'src> Parser<'src> {
             TokenKind::Int(n)     => self.world.alloc(NodeKind::IntLit(n), tok.span),
             TokenKind::Float(f)   => self.world.alloc(NodeKind::FloatLit(f), tok.span),
             TokenKind::Bool(b)    => self.world.alloc(NodeKind::BoolLit(b), tok.span),
-            TokenKind::Str(s)     => self.world.alloc(NodeKind::StringLit(s), tok.span),
-            TokenKind::Ident(name) => self.world.alloc(NodeKind::Ident(name), tok.span),
+            TokenKind::Str(s)     => self.world.alloc(NodeKind::StringLit(self.arena.alloc_str(&s)), tok.span),
+            TokenKind::Ident(name) => self.world.alloc(NodeKind::Ident(self.arena.alloc_str(&name)), tok.span),
             TokenKind::LParen => {
                 let inner = self.parse_expr();
                 self.expect(&TokenKind::RParen);

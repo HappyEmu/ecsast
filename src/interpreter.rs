@@ -90,17 +90,17 @@ impl Env {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_program(world: &AstWorld, root: NodeId) -> Value {
+pub fn run_program(world: &AstWorld<'_>, root: NodeId) -> Value {
     let mut env = Env::new();
 
     // Register all top-level FnDecls
     let items = match world.kind(root) {
-        NodeKind::Program(items) => items.clone(),
+        NodeKind::Program(items) => *items,
         _ => panic!("root must be a Program node"),
     };
-    for item in items {
+    for item in items.iter().copied() {
         if let NodeKind::FnDecl { name, params, body, .. } = world.kind(item) {
-            env.fns.insert(name.clone(), (params.clone(), *body));
+            env.fns.insert(name.to_string(), (params.to_vec(), *body));
         }
     }
 
@@ -119,14 +119,14 @@ pub fn run_program(world: &AstWorld, root: NodeId) -> Value {
 // Core evaluator
 // ---------------------------------------------------------------------------
 
-fn eval(world: &AstWorld, id: NodeId, env: &mut Env) -> Flow {
-    match world.kind(id).clone() {
+fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env) -> Flow {
+    match *world.kind(id) {
         NodeKind::IntLit(n)    => Flow::Val(Value::Int(n)),
         NodeKind::FloatLit(f)  => Flow::Val(Value::Float(f)),
         NodeKind::BoolLit(b)   => Flow::Val(Value::Bool(b)),
-        NodeKind::StringLit(s) => Flow::Val(Value::Str(s)),
+        NodeKind::StringLit(s) => Flow::Val(Value::Str(s.to_string())),
 
-        NodeKind::Ident(name) => Flow::Val(env.get(&name)),
+        NodeKind::Ident(name) => Flow::Val(env.get(name)),
 
         NodeKind::BinOp { op, lhs, rhs } => {
             let l = match eval(world, lhs, env) { Flow::Val(v) | Flow::Ret(v) => v };
@@ -142,13 +142,13 @@ fn eval(world: &AstWorld, id: NodeId, env: &mut Env) -> Flow {
         NodeKind::Call { callee, args } => {
             // Extract function name
             let fn_name = match world.kind(callee) {
-                NodeKind::Ident(name) => name.clone(),
+                NodeKind::Ident(name) => *name,
                 _ => panic!("callee must be an identifier"),
             };
 
             // Evaluate arguments
             let mut arg_vals = Vec::new();
-            for &a in &args {
+            for &a in args {
                 let v = match eval(world, a, env) { Flow::Val(v) | Flow::Ret(v) => v };
                 arg_vals.push(v);
             }
@@ -162,7 +162,7 @@ fn eval(world: &AstWorld, id: NodeId, env: &mut Env) -> Flow {
 
             // User-defined function
             let (param_ids, body) = env.fns
-                .get(&fn_name)
+                .get(fn_name)
                 .unwrap_or_else(|| panic!("undefined function: {fn_name}"))
                 .clone();
 
@@ -187,19 +187,19 @@ fn eval(world: &AstWorld, id: NodeId, env: &mut Env) -> Flow {
                 },
                 None => Value::Unit,
             };
-            env.define(&name, val);
+            env.define(name, val);
             Flow::Val(Value::Unit)
         }
 
         NodeKind::AssignStmt { target, value } => {
             let name = match world.kind(target) {
-                NodeKind::Ident(n) => n.clone(),
+                NodeKind::Ident(n) => *n,
                 _ => panic!("assignment target must be an identifier"),
             };
             let val = match eval(world, value, env) {
                 Flow::Val(v) | Flow::Ret(v) => v,
             };
-            env.assign(&name, val);
+            env.assign(name, val);
             Flow::Val(Value::Unit)
         }
 
@@ -261,14 +261,14 @@ fn eval(world: &AstWorld, id: NodeId, env: &mut Env) -> Flow {
 // Block evaluator — manages its own scope
 // ---------------------------------------------------------------------------
 
-fn eval_block(world: &AstWorld, id: NodeId, env: &mut Env) -> Flow {
+fn eval_block(world: &AstWorld<'_>, id: NodeId, env: &mut Env) -> Flow {
     let stmts = match world.kind(id) {
-        NodeKind::Block(stmts) => stmts.clone(),
+        NodeKind::Block(stmts) => *stmts,
         _ => panic!("eval_block called on non-Block node"),
     };
 
     env.push_scope();
-    for stmt in stmts {
+    for stmt in stmts.iter().copied() {
         match eval(world, stmt, env) {
             Flow::Val(_) => {}
             Flow::Ret(v) => {
