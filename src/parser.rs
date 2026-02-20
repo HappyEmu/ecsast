@@ -34,6 +34,7 @@ fn infix_bp(kind: &TokenKind) -> Option<(u8, u8)> {
         TokenKind::Lt | TokenKind::LtEq | TokenKind::Gt | TokenKind::GtEq => (7, 8), // < <= > >=
         TokenKind::Plus | TokenKind::Minus => (9, 10), // + -
         TokenKind::Star | TokenKind::Slash | TokenKind::Percent => (11, 12), // * / %
+        TokenKind::StarStar => (13, 13), // ** (right-associative: r_bp == l_bp)
         _ => return None,
     };
     Some(bp)
@@ -46,6 +47,7 @@ fn token_to_binop(kind: &TokenKind) -> BinOp {
         TokenKind::Star => BinOp::Mul,
         TokenKind::Slash => BinOp::Div,
         TokenKind::Percent => BinOp::Mod,
+        TokenKind::StarStar => BinOp::Pow,
         TokenKind::EqEq => BinOp::Eq,
         TokenKind::BangEq => BinOp::Ne,
         TokenKind::Lt => BinOp::Lt,
@@ -1076,6 +1078,70 @@ mod tests {
         assert!(matches!(
             *world.kind(rhs),
             NodeKind::BinOp { op: BinOp::Mod, .. }
+        ));
+    }
+
+    #[test]
+    fn power_right_associativity() {
+        // `2 ** 3 ** 2` must parse as `2 ** (3 ** 2)` (right-assoc)
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = 2 ** 3 ** 2; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        // outer: Pow(2, inner)
+        let NodeKind::BinOp {
+            op: BinOp::Pow,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Pow")
+        };
+        assert!(matches!(*world.kind(lhs), NodeKind::IntLit(2)));
+        // inner: Pow(3, 2)
+        let NodeKind::BinOp {
+            op: BinOp::Pow,
+            lhs: l2,
+            rhs: r2,
+        } = *world.kind(rhs)
+        else {
+            panic!("expected inner Pow")
+        };
+        assert!(matches!(*world.kind(l2), NodeKind::IntLit(3)));
+        assert!(matches!(*world.kind(r2), NodeKind::IntLit(2)));
+    }
+
+    #[test]
+    fn power_binds_tighter_than_mul() {
+        // `2 * 3 ** 2` must parse as `2 * (3 ** 2)`
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let r: int = 2 * 3 ** 2; }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt {
+            init: Some(expr), ..
+        } = *world.kind(children(&world, body)[0])
+        else {
+            panic!()
+        };
+        let NodeKind::BinOp {
+            op: BinOp::Mul,
+            lhs,
+            rhs,
+        } = *world.kind(expr)
+        else {
+            panic!("expected outer Mul")
+        };
+        assert!(matches!(*world.kind(lhs), NodeKind::IntLit(2)));
+        assert!(matches!(
+            *world.kind(rhs),
+            NodeKind::BinOp { op: BinOp::Pow, .. }
         ));
     }
 

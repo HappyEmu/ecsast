@@ -48,6 +48,15 @@ void ecsast_arg(long i, const char **out_ptr, long *out_len) {
     long len = 0; while (g_argv[i][len]) len++;
     *out_len = len;
 }
+long ecsast_ipow(long base, long exp) {
+    long result = 1;
+    while (exp > 0) {
+        if (exp & 1) result *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return result;
+}
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +73,7 @@ struct Compiler<'a, 'arena> {
     init_args_id: FuncId,
     argc_id: FuncId,
     arg_id: FuncId,
+    ipow_id: FuncId,
     user_funcs: HashMap<String, FuncId>,
     string_data: HashMap<String, (DataId, usize)>,
     inline_funcs: HashSet<String>,
@@ -77,6 +87,7 @@ struct FnCtx {
     init_args_ref: FuncRef,
     argc_ref: FuncRef,
     arg_ref: FuncRef,
+    ipow_ref: FuncRef,
     func_refs: HashMap<String, FuncRef>,
     return_type: Option<ValType>,
 }
@@ -133,6 +144,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         arg_sig.params.push(AbiParam::new(ptr_type));
         let arg_id = module.declare_function("ecsast_arg", Linkage::Import, &arg_sig)?;
 
+        // Declare ecsast_ipow(i64, i64) -> i64
+        let mut ipow_sig = module.make_signature();
+        ipow_sig.params.push(AbiParam::new(types::I64));
+        ipow_sig.params.push(AbiParam::new(types::I64));
+        ipow_sig.returns.push(AbiParam::new(types::I64));
+        let ipow_id = module.declare_function("ecsast_ipow", Linkage::Import, &ipow_sig)?;
+
         Ok(Self {
             world,
             module,
@@ -141,6 +159,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             init_args_id,
             argc_id,
             arg_id,
+            ipow_id,
             user_funcs: HashMap::new(),
             string_data: HashMap::new(),
             inline_funcs: HashSet::new(),
@@ -412,6 +431,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         let arg_ref = self
             .module
             .declare_func_in_func(self.arg_id, builder.func);
+        let ipow_ref = self
+            .module
+            .declare_func_in_func(self.ipow_id, builder.func);
 
         let mut func_refs = HashMap::new();
         for (name, &fid) in &self.user_funcs {
@@ -426,6 +448,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             init_args_ref,
             argc_ref,
             arg_ref,
+            ipow_ref,
             func_refs,
             return_type,
         }
@@ -728,6 +751,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                             BinOp::Mod => builder.ins().srem(l64, r64),
                             _ => unreachable!(),
                         };
+                        (result, ValType::I64)
+                    }
+                    BinOp::Pow => {
+                        let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                        let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                        let call = builder.ins().call(fn_ctx.ipow_ref, &[l64, r64]);
+                        let result = builder.inst_results(call)[0];
                         (result, ValType::I64)
                     }
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
