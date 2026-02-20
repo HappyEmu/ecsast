@@ -112,18 +112,21 @@ Project Layout
       ast.rs          NodeId, NodeKind, AstWorld (the ECS store)
       codegen.rs      Cranelift-based native code generation
       passes.rs       Tree-walk annotation passes (currently unused)
-      interpreter.rs  Tree-walking evaluator (currently unused)
+      interpreter.rs  Tree-walking interpreter (alternative to codegen)
       printer.rs      Debug pretty-printer for the AST
       span.rs         Byte-range source locations
 
     examples/         Example .ecs programs you can compile and run
-    tests/            End-to-end compiler tests
+    tests/
+      compile_and_run.rs  End-to-end codegen tests (compile + run binary)
+      interpreter.rs      Interpreter tests (parse + interpret in-process)
+      programs/           Shared test fixtures (source.ecs + expected_output)
 
 
 Running Tests
 -------------
 
-    cargo test           # run all tests (parser + end-to-end)
+    cargo test           # run all tests (parser + codegen + interpreter)
     cargo test -- <name> # run a single test by name substring
     cargo clippy         # check for lint warnings
 

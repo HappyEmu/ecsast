@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build          # build debug binary
 cargo build --release
-cargo test           # run all tests (parser unit tests + end-to-end codegen tests)
+cargo test           # run all tests (parser + codegen + interpreter)
 cargo test -- <name> # run a single test by name substring
 cargo clippy         # lint
 ```
@@ -42,7 +42,7 @@ ECSAST is a language implementation that uses an **Entity-Component-System (ECS)
 Source file (.ecs) → Lexer → Vec<Token> → Parser → AstWorld{kinds,spans} → Cranelift Codegen → Native Binary
 ```
 
-The interpreter (`interpreter.rs`) and passes (`passes.rs`) exist but are currently unused; `main.rs` drives the Cranelift codegen path directly.
+The interpreter (`interpreter.rs`) is a tree-walking evaluator that runs programs directly without compilation. It is tested against the same `tests/programs/` fixtures as the codegen path. Passes (`passes.rs`) exist but are currently unused. `main.rs` drives the Cranelift codegen path.
 
 ### Module Roles
 
@@ -53,7 +53,7 @@ The interpreter (`interpreter.rs`) and passes (`passes.rs`) exist but are curren
 | `ast.rs` | `NodeId`, `NodeKind` (Copy enum), `TypeInfo`, and `AstWorld` (the ECS store) |
 | `codegen.rs` | Cranelift-based native compiler; `Compiler` struct with two-pass function compilation (declare then define), emits object file and links with C runtime |
 | `passes.rs` | Independent tree-walk passes that annotate `AstWorld` in-place (`annotate_literal_types`, `compute_parents`) — currently unused |
-| `interpreter.rs` | Tree-walking evaluator; `Env` holds scoped variables + function registry; `Flow` signals early returns — currently unused |
+| `interpreter.rs` | Tree-walking evaluator; `Env` holds scoped variables, function registry, and `&mut dyn Write` for output capture; `Flow` signals early returns. Tested against the same fixtures as codegen |
 | `printer.rs` | Debug pretty-printer for the AST (reads `kinds`, `spans`, `types`) |
 | `span.rs` | Byte-range `Span` struct for source locations |
 
@@ -140,6 +140,7 @@ Supported constructs:
 
 - **Parser unit tests** live in `src/parser.rs` (inline `#[cfg(test)]` module). They test parse-tree structure by querying `AstWorld` after parsing.
 - **End-to-end codegen tests** live in `tests/compile_and_run.rs`. They compile example programs from `tests/programs/`, run the resulting binaries, and assert on stdout output.
+- **Interpreter tests** live in `tests/interpreter.rs`. They parse and interpret the same `tests/programs/` fixtures in-process using `run_program_with_output` with a `Vec<u8>` buffer, asserting output matches expected. All programs except `args` (which needs `argc`/`arg` built-ins not yet in the interpreter) are covered.
 - **Example programs** in `examples/` (`.ecs` files) can be compiled directly with `cargo run -- examples/<name>.ecs`.
 
 ### Adding a New Language Feature
@@ -151,4 +152,4 @@ Typical workflow for adding a new keyword or construct:
 3. **Parser** (`parser.rs`): update `parse_item`/`parse_stmt`/`parse_expr` to handle the new token and produce the new `NodeKind`
 4. **Codegen** (`codegen.rs`): update pattern matches on `NodeKind` in `compile_stmt`/`compile_expr` and add IR generation
 5. **Other modules**: update pattern matches in `printer.rs`, `passes.rs`, `interpreter.rs` (use `..` in patterns to avoid breakage from new fields)
-6. **Tests**: add a test program in `tests/programs/<name>/` with `source.ecs` and `expected_output`, add a test function in `tests/compile_and_run.rs`
+6. **Tests**: add a test program in `tests/programs/<name>/` with `source.ecs` and `expected_output`, add a test function in both `tests/compile_and_run.rs` and `tests/interpreter.rs`
