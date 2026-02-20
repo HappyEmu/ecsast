@@ -77,6 +77,11 @@ fn add() {
 }
 
 #[test]
+fn power() {
+    run_interpreter_test("power");
+}
+
+#[test]
 fn stress() {
     run_interpreter_test("stress");
 }

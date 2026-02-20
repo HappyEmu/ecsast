@@ -366,11 +366,13 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         (BinOp::Mul, Value::Int(a), Value::Int(b)) => Value::Int(a * b),
         (BinOp::Div, Value::Int(a), Value::Int(b)) => Value::Int(a / b),
         (BinOp::Mod, Value::Int(a), Value::Int(b)) => Value::Int(a % b),
+        (BinOp::Pow, Value::Int(a), Value::Int(b)) => Value::Int(a.pow(b as u32)),
         // Float arithmetic
         (BinOp::Add, Value::Float(a), Value::Float(b)) => Value::Float(a + b),
         (BinOp::Sub, Value::Float(a), Value::Float(b)) => Value::Float(a - b),
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => Value::Float(a * b),
         (BinOp::Div, Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+        (BinOp::Pow, Value::Float(a), Value::Float(b)) => Value::Float(a.powf(b)),
         // Int comparisons
         (BinOp::Eq, Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
         (BinOp::Ne, Value::Int(a), Value::Int(b)) => Value::Bool(a != b),

@@ -26,6 +26,7 @@ pub enum TokenKind {
     Plus,
     Minus,
     Star,
+    StarStar, // **  (power)
     Slash,
     Percent,
 
@@ -161,7 +162,12 @@ impl<'a> Lexer<'a> {
             }
             '*' => {
                 self.advance();
-                TokenKind::Star
+                if self.peek() == Some('*') {
+                    self.advance();
+                    TokenKind::StarStar
+                } else {
+                    TokenKind::Star
+                }
             }
             '/' => {
                 self.advance();

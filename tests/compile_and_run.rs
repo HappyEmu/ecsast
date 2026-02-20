@@ -101,6 +101,11 @@ fn args() {
     run_program_test_with_args("args", &["hello", "world"]);
 }
 
+#[test]
+fn power() {
+    run_program_test("power");
+}
+
 #[ignore]
 #[test]
 fn stress() {
