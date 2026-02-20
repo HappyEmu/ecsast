@@ -111,6 +111,11 @@ fn float_arithmetic() {
     run_program_test("float_arithmetic");
 }
 
+#[test]
+fn bitwise() {
+    run_program_test("bitwise");
+}
+
 #[ignore]
 #[test]
 fn stress() {

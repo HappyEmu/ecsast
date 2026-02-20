@@ -30,11 +30,15 @@ fn infix_bp(kind: &TokenKind) -> Option<(u8, u8)> {
     let bp = match kind {
         TokenKind::PipePipe => (1, 2),                 // ||
         TokenKind::AmpAmp => (3, 4),                   // &&
-        TokenKind::EqEq | TokenKind::BangEq => (5, 6), // == !=
-        TokenKind::Lt | TokenKind::LtEq | TokenKind::Gt | TokenKind::GtEq => (7, 8), // < <= > >=
-        TokenKind::Plus | TokenKind::Minus => (9, 10), // + -
-        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => (11, 12), // * / %
-        TokenKind::StarStar => (13, 13), // ** (right-associative: r_bp == l_bp)
+        TokenKind::Pipe => (5, 6),                     // | (bitwise OR)
+        TokenKind::Caret => (7, 8),                    // ^ (bitwise XOR)
+        TokenKind::Amp => (9, 10),                     // & (bitwise AND)
+        TokenKind::EqEq | TokenKind::BangEq => (11, 12), // == !=
+        TokenKind::Lt | TokenKind::LtEq | TokenKind::Gt | TokenKind::GtEq => (13, 14), // < <= > >=
+        TokenKind::LtLt | TokenKind::GtGt => (15, 16), // << >>
+        TokenKind::Plus | TokenKind::Minus => (17, 18), // + -
+        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => (19, 20), // * / %
+        TokenKind::StarStar => (21, 21), // ** (right-associative: r_bp == l_bp)
         _ => return None,
     };
     Some(bp)
@@ -56,6 +60,11 @@ fn token_to_binop(kind: &TokenKind) -> BinOp {
         TokenKind::GtEq => BinOp::Ge,
         TokenKind::AmpAmp => BinOp::And,
         TokenKind::PipePipe => BinOp::Or,
+        TokenKind::Amp => BinOp::BitAnd,
+        TokenKind::Pipe => BinOp::BitOr,
+        TokenKind::Caret => BinOp::BitXor,
+        TokenKind::LtLt => BinOp::Shl,
+        TokenKind::GtGt => BinOp::Shr,
         other => panic!("not a binary operator: {:?}", other),
     }
 }
@@ -435,6 +444,19 @@ impl<'src, 'arena> Parser<'src, 'arena> {
                 self.world.alloc(
                     NodeKind::UnaryOp {
                         op: UnaryOp::Not,
+                        operand,
+                    },
+                    Span::new(start, end),
+                )
+            }
+            TokenKind::Tilde => {
+                let start = self.start_span();
+                self.advance();
+                let operand = self.parse_unary();
+                let end = self.end_of(operand);
+                self.world.alloc(
+                    NodeKind::UnaryOp {
+                        op: UnaryOp::BitNot,
                         operand,
                     },
                     Span::new(start, end),

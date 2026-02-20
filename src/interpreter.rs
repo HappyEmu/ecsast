@@ -404,6 +404,12 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         // Logical
         (BinOp::And, Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
         (BinOp::Or, Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
+        // Bitwise
+        (BinOp::BitAnd, Value::Int(a), Value::Int(b)) => Value::Int(a & b),
+        (BinOp::BitOr,  Value::Int(a), Value::Int(b)) => Value::Int(a | b),
+        (BinOp::BitXor, Value::Int(a), Value::Int(b)) => Value::Int(a ^ b),
+        (BinOp::Shl,    Value::Int(a), Value::Int(b)) => Value::Int(a << b),
+        (BinOp::Shr,    Value::Int(a), Value::Int(b)) => Value::Int(a >> b),
         // String concat
         (BinOp::Add, Value::Str(a), Value::Str(b)) => Value::Str(a + &b),
         // Type error
@@ -416,6 +422,7 @@ fn apply_unary(op: UnaryOp, v: Value) -> Value {
         (UnaryOp::Neg, Value::Int(n)) => Value::Int(-n),
         (UnaryOp::Neg, Value::Float(f)) => Value::Float(-f),
         (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
+        (UnaryOp::BitNot, Value::Int(n)) => Value::Int(!n),
         (op, v) => panic!("type error: cannot apply {op:?} to {v:?}"),
     }
 }

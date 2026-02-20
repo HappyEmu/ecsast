@@ -87,6 +87,11 @@ fn float_arithmetic() {
 }
 
 #[test]
+fn bitwise() {
+    run_interpreter_test("bitwise");
+}
+
+#[test]
 fn stress() {
     run_interpreter_test("stress");
 }
