@@ -82,6 +82,11 @@ fn power() {
 }
 
 #[test]
+fn float_arithmetic() {
+    run_interpreter_test("float_arithmetic");
+}
+
+#[test]
 fn stress() {
     run_interpreter_test("stress");
 }

@@ -106,6 +106,11 @@ fn power() {
     run_program_test("power");
 }
 
+#[test]
+fn float_arithmetic() {
+    run_program_test("float_arithmetic");
+}
+
 #[ignore]
 #[test]
 fn stress() {

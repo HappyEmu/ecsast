@@ -1,0 +1,15 @@
+fn double_it(x: float) -> float {
+    return x + x;
+}
+
+fn main() {
+    let a: float = 1.5;
+    let b: float = 3.0;
+    print(a + b);
+    print(b - a);
+    print(a * b);
+    print(b / a);
+    print(double_it(a));
+    let neg: float = -2.5;
+    print(neg);
+}
