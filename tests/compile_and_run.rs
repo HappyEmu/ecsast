@@ -121,3 +121,8 @@ fn bitwise() {
 fn stress() {
     run_program_test("stress");
 }
+
+#[test]
+fn stress_big_blocks() {
+    run_program_test("stress_big_blocks");
+}

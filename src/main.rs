@@ -47,6 +47,21 @@ struct Cli {
     time: bool,
 }
 
+fn print_timings(
+    lex_time: std::time::Duration,
+    parse_time: std::time::Duration,
+    codegen_time: std::time::Duration,
+    src_len: usize,
+) {
+    let src_bytes = src_len as f64;
+    let mb = |d: std::time::Duration| src_bytes / d.as_secs_f64() / (1024.0 * 1024.0);
+    let total = lex_time + parse_time + codegen_time;
+    eprintln!("  lex:     {lex_time:>10.3?}  ({:>8.2} MB/s)", mb(lex_time));
+    eprintln!("  parse:   {parse_time:>10.3?}  ({:>8.2} MB/s)", mb(parse_time));
+    eprintln!("  codegen: {codegen_time:>10.3?}  ({:>8.2} MB/s)", mb(codegen_time));
+    eprintln!("  total:   {:>10.3?}  ({:>8.2} MB/s)", total, mb(total));
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -75,9 +90,6 @@ fn main() {
     println!("Compiled {} -> {output}", cli.file.display());
 
     if cli.time {
-        eprintln!("  lex:     {lex_time:>10.3?}");
-        eprintln!("  parse:   {parse_time:>10.3?}");
-        eprintln!("  codegen: {codegen_time:>10.3?}");
-        eprintln!("  total:   {:>10.3?}", lex_time + parse_time + codegen_time);
+        print_timings(lex_time, parse_time, codegen_time, src.len());
     }
 }
