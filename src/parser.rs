@@ -148,14 +148,18 @@ impl<'src, 'arena> Parser<'src, 'arena> {
 
     fn parse_item(&mut self) -> NodeId {
         match self.peek() {
-            TokenKind::Fn => self.parse_fn_decl(),
+            TokenKind::Inline => {
+                self.advance();
+                self.parse_fn_decl(true)
+            }
+            TokenKind::Fn => self.parse_fn_decl(false),
             other => panic!("expected top-level item, got {:?}", other),
         }
     }
 
     // ---- Function declaration -----------------------------------------------
 
-    fn parse_fn_decl(&mut self) -> NodeId {
+    fn parse_fn_decl(&mut self, inline: bool) -> NodeId {
         let start = self.start_span();
         self.expect(&TokenKind::Fn);
 
@@ -188,6 +192,7 @@ impl<'src, 'arena> Parser<'src, 'arena> {
                 params: self.arena.alloc_slice_copy(&params),
                 ret_ty,
                 body,
+                inline,
             },
             Span::new(start, end),
         )
@@ -546,6 +551,7 @@ mod tests {
             params,
             ret_ty,
             body,
+            inline,
         } = *world.kind(items[0])
         else {
             panic!("expected FnDecl");
@@ -554,6 +560,7 @@ mod tests {
         assert!(params.is_empty());
         assert!(ret_ty.is_none());
         assert!(children(&world, body).is_empty());
+        assert!(!inline);
     }
 
     #[test]
@@ -591,6 +598,7 @@ mod tests {
             params,
             ret_ty,
             body,
+            ..
         } = *world.kind(fn_id)
         else {
             panic!()

@@ -92,6 +92,11 @@ fn nested_loops() {
 }
 
 #[test]
+fn add() {
+    run_program_test("add");
+}
+
+#[test]
 fn args() {
     run_program_test_with_args("args", &["hello", "world"]);
 }

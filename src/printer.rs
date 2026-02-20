@@ -22,8 +22,10 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
             params,
             ret_ty,
             body,
+            inline,
         } => {
-            println!("{pad}FnDecl `{name}` [{s}..{e}]", s = sp.start, e = sp.end);
+            let inl = if *inline { " (inline)" } else { "" };
+            println!("{pad}FnDecl `{name}`{inl} [{s}..{e}]", s = sp.start, e = sp.end);
             for &p in *params {
                 print_ast(world, p, indent + 1);
             }

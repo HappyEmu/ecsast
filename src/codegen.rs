@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::process::Command;
 
-use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, StackSlotData, StackSlotKind, UserFuncName};
-use cranelift_codegen::ir::{condcodes::IntCC, FuncRef, Value};
+use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, Opcode, StackSlotData, StackSlotKind, UserFuncName};
+use cranelift_codegen::ir::{condcodes::IntCC, FuncRef, Inst, Value};
 use cranelift_codegen::isa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
-use cranelift_codegen::entity::EntityRef;
+use cranelift_codegen::inline::{Inline, InlineCommand};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -65,11 +66,12 @@ struct Compiler<'a, 'arena> {
     arg_id: FuncId,
     user_funcs: HashMap<String, FuncId>,
     string_data: HashMap<String, (DataId, usize)>,
+    inline_funcs: HashSet<String>,
+    inline_bodies: HashMap<FuncId, Function>,
 }
 
 struct FnCtx {
     vars: HashMap<String, (Variable, ValType)>,
-    next_var: usize,
     print_int_ref: FuncRef,
     print_str_ref: FuncRef,
     init_args_ref: FuncRef,
@@ -77,14 +79,6 @@ struct FnCtx {
     arg_ref: FuncRef,
     func_refs: HashMap<String, FuncRef>,
     return_type: Option<ValType>,
-}
-
-impl FnCtx {
-    fn fresh_var(&mut self) -> Variable {
-        let v = Variable::new(self.next_var);
-        self.next_var += 1;
-        v
-    }
 }
 
 impl<'a, 'arena> Compiler<'a, 'arena> {
@@ -149,6 +143,8 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             arg_id,
             user_funcs: HashMap::new(),
             string_data: HashMap::new(),
+            inline_funcs: HashSet::new(),
+            inline_bodies: HashMap::new(),
         })
     }
 
@@ -173,6 +169,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 name,
                 params,
                 ret_ty,
+                inline,
                 ..
             } = *self.world.kind(id)
             {
@@ -192,6 +189,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 }
                 let func_id = self.module.declare_function(name, Linkage::Local, &sig)?;
                 self.user_funcs.insert(name.to_string(), func_id);
+                if inline {
+                    self.inline_funcs.insert(name.to_string());
+                }
             }
         }
         Ok(())
@@ -236,6 +236,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 params,
                 ret_ty,
                 body,
+                ..
             } = *self.world.kind(id)
             {
                 if name == "main" {
@@ -317,6 +318,12 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
 
         let mut ctx = Context::for_function(func);
+        if !self.inline_bodies.is_empty() {
+            let mut inliner = Inliner {
+                inline_bodies: &self.inline_bodies,
+            };
+            ctx.inline(&mut inliner)?;
+        }
         self.module.define_function(main_func_id, &mut ctx)?;
         Ok(())
     }
@@ -352,8 +359,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 } = *self.world.kind(param_id)
                 {
                     let vt = self.resolve_type_name(ty_id);
-                    let var = fn_ctx.fresh_var();
-                    builder.declare_var(var, self.cranelift_type(vt));
+                    let var = builder.declare_var(self.cranelift_type(vt));
                     let val = builder.block_params(entry)[i];
                     builder.def_var(var, val);
                     fn_ctx.vars.insert(pname.to_string(), (var, vt));
@@ -369,7 +375,18 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             builder.finalize();
         }
 
+        let is_inline = self.inline_funcs.contains(name);
+        if is_inline {
+            self.inline_bodies.insert(func_id, func.clone());
+        }
+
         let mut ctx = Context::for_function(func);
+        if !self.inline_bodies.is_empty() {
+            let mut inliner = Inliner {
+                inline_bodies: &self.inline_bodies,
+            };
+            ctx.inline(&mut inliner)?;
+        }
         self.module.define_function(func_id, &mut ctx)?;
         Ok(())
     }
@@ -404,7 +421,6 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
         FnCtx {
             vars: HashMap::new(),
-            next_var: 0,
             print_int_ref,
             print_str_ref,
             init_args_ref,
@@ -445,8 +461,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         match *self.world.kind(id) {
             NodeKind::LetStmt { name, ty, init } => {
                 let vt = ty.map(|t| self.resolve_type_name(t)).unwrap_or(ValType::I64);
-                let var = fn_ctx.fresh_var();
-                builder.declare_var(var, self.cranelift_type(vt));
+                let var = builder.declare_var(self.cranelift_type(vt));
                 if let Some(init_id) = init {
                     let (val, val_ty) = self.compile_expr(init_id, builder, fn_ctx);
                     let coerced = self.coerce(val, val_ty, vt, builder);
@@ -775,6 +790,35 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             (ValType::I64, ValType::Bool) => builder.ins().ireduce(types::I8, val),
             _ => val,
         }
+    }
+}
+
+struct Inliner<'a> {
+    inline_bodies: &'a HashMap<FuncId, Function>,
+}
+
+impl Inline for Inliner<'_> {
+    fn inline(
+        &mut self,
+        caller: &Function,
+        _call_inst: Inst,
+        _call_opcode: Opcode,
+        callee: FuncRef,
+        _call_args: &[Value],
+    ) -> InlineCommand<'_> {
+        // Resolve callee FuncRef → ExternalName → UserExternalName → FuncId
+        let ext_data = &caller.stencil.dfg.ext_funcs[callee];
+        if let cranelift_codegen::ir::ExternalName::User(name_ref) = ext_data.name {
+            let user_name = &caller.params.user_named_funcs()[name_ref];
+            let func_id = FuncId::from_u32(user_name.index);
+            if let Some(body) = self.inline_bodies.get(&func_id) {
+                return InlineCommand::Inline {
+                    callee: Cow::Borrowed(body),
+                    visit_callee: false,
+                };
+            }
+        }
+        InlineCommand::KeepCall
     }
 }
 

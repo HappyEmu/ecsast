@@ -15,6 +15,7 @@ pub enum TokenKind {
     // Identifiers / keywords
     Ident(String),
     Fn,
+    Inline,
     Let,
     If,
     Else,
@@ -306,6 +307,7 @@ impl<'a> Lexer<'a> {
         }
         match &self.src[start..self.pos] {
             "fn" => TokenKind::Fn,
+            "inline" => TokenKind::Inline,
             "let" => TokenKind::Let,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,

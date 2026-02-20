@@ -69,6 +69,7 @@ pub enum NodeKind<'arena> {
         params: &'arena [NodeId],
         ret_ty: Option<NodeId>,
         body: NodeId,
+        inline: bool,
     },
     Param {
         name: &'arena str,
