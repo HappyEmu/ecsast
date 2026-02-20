@@ -12,6 +12,35 @@ slotmap::new_key_type! {
 }
 
 // ---------------------------------------------------------------------------
+// Built-in functions
+//
+// The parser resolves known built-in names at parse time and stores them as
+// `NodeKind::BuiltinCall` rather than `NodeKind::Call`.  Adding a new
+// built-in only requires a new variant here plus arms in the codegen and
+// interpreter dispatch functions — no struct fields or if/else chains.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    Print,
+    Argc,
+    Arg,
+}
+
+impl Builtin {
+    /// Return the `Builtin` variant for a given function name, or `None` if
+    /// the name does not name a built-in.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "print" => Some(Self::Print),
+            "argc" => Some(Self::Argc),
+            "arg" => Some(Self::Arg),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core component: NodeKind
 //
 // Every node must have exactly one NodeKind.  All other components are
@@ -39,6 +68,12 @@ pub enum NodeKind<'arena> {
     },
     Call {
         callee: NodeId,
+        args: &'arena [NodeId],
+    },
+    /// A call to a language built-in resolved at parse time.
+    /// Avoids string comparisons at codegen / interpreter time.
+    BuiltinCall {
+        builtin: Builtin,
         args: &'arena [NodeId],
     },
 

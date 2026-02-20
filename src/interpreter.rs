@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 
-use crate::ast::{AstWorld, BinOp, NodeId, NodeKind, UnaryOp};
+use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind, UnaryOp};
 
 // ---------------------------------------------------------------------------
 // Runtime values
@@ -164,6 +164,7 @@ fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env<'_>) -> Flow {
         NodeKind::BinOp { op, lhs, rhs } => eval_binop(world, env, op, lhs, rhs),
         NodeKind::UnaryOp { op, operand } => eval_unaryop(world, env, op, operand),
         NodeKind::Call { callee, args } => eval_call(world, env, callee, args),
+        NodeKind::BuiltinCall { builtin, args } => eval_builtin_call(world, env, builtin, args),
         NodeKind::LetStmt { name, init, .. } => eval_let(world, env, name, init),
         NodeKind::AssignStmt { target, value } => eval_assign(world, env, target, value),
         NodeKind::ReturnStmt(opt) => eval_return(world, env, opt),
@@ -223,16 +224,6 @@ fn eval_call(
         .map(|&a| eval(world, a, env).into_value())
         .collect();
 
-    if fn_name == "print" {
-        let s = arg_vals
-            .iter()
-            .map(print_format)
-            .collect::<Vec<_>>()
-            .join(" ");
-        writeln!(env.out, "{s}").expect("write failed");
-        return Flow::Val(Value::Unit);
-    }
-
     let (param_ids, body) = env
         .fns
         .get(fn_name)
@@ -249,6 +240,33 @@ fn eval_call(
     env.pop_scope();
 
     Flow::Val(result.into_value())
+}
+
+/// Evaluate a call to a language built-in.
+/// Each variant matches on the `Builtin` enum — no string comparisons.
+fn eval_builtin_call(
+    world: &AstWorld<'_>,
+    env: &mut Env<'_>,
+    builtin: Builtin,
+    args: &[NodeId],
+) -> Flow {
+    match builtin {
+        Builtin::Print => {
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|&a| eval(world, a, env).into_value())
+                .collect();
+            let s = arg_vals
+                .iter()
+                .map(print_format)
+                .collect::<Vec<_>>()
+                .join(" ");
+            writeln!(env.out, "{s}").expect("write failed");
+            Flow::Val(Value::Unit)
+        }
+        Builtin::Argc => panic!("argc() is not supported in the interpreter"),
+        Builtin::Arg => panic!("arg() is not supported in the interpreter"),
+    }
 }
 
 fn eval_let(
