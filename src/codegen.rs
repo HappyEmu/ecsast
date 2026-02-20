@@ -15,7 +15,7 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 
-use crate::ast::{AstWorld, BinOp, NodeId, NodeKind};
+use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum OptLevel {
@@ -596,11 +596,15 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 self.compile_call(callee, args, builder, fn_ctx);
                 false
             }
+            NodeKind::BuiltinCall { builtin, args } => {
+                self.compile_builtin_call(builtin, args, builder, fn_ctx);
+                false
+            }
             _ => panic!("unsupported statement: {:?}", self.world.kind(id)),
         }
     }
 
-    /// Compile a call expression. Returns Option<(Value, ValType)> for calls with return values.
+    /// Compile a call to a user-defined function.
     fn compile_call(
         &mut self,
         callee: NodeId,
@@ -613,29 +617,50 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             _ => panic!("callee must be an identifier"),
         };
 
-        if fn_name == "print" {
-            assert!(args.len() == 1, "print() takes exactly 1 argument");
-            // Check if the argument is a string literal or arg() call
-            match self.world.kind(args[0]) {
-                NodeKind::StringLit(s) => {
-                    let s = s.to_string();
-                    let (data_id, len) = self.get_or_create_string_data(&s);
-                    let gv = self
-                        .module
-                        .declare_data_in_func(data_id, builder.func);
-                    let ptr = builder.ins().symbol_value(
-                        self.module.target_config().pointer_type(),
-                        gv,
-                    );
-                    let len_val = builder.ins().iconst(types::I64, len as i64);
-                    builder.ins().call(fn_ctx.print_str_ref, &[ptr, len_val]);
-                }
-                NodeKind::Call { callee, args: inner_args } => {
-                    let inner_name = match self.world.kind(*callee) {
-                        NodeKind::Ident(n) => *n,
-                        _ => panic!("callee must be an identifier"),
-                    };
-                    if inner_name == "arg" {
+        if let Some(&fref) = fn_ctx.func_refs.get(fn_name) {
+            let mut arg_vals = Vec::new();
+            for &arg_id in args {
+                let (val, _val_ty) = self.compile_expr(arg_id, builder, fn_ctx);
+                arg_vals.push(val);
+            }
+            let call = builder.ins().call(fref, &arg_vals);
+            let results = builder.inst_results(call);
+            if results.is_empty() {
+                None
+            } else {
+                // For now assume i64 for non-void returns
+                Some((results[0], ValType::I64))
+            }
+        } else {
+            panic!("undefined function: {fn_name}");
+        }
+    }
+
+    /// Compile a call to a language built-in.
+    /// Each variant matches on the `Builtin` enum — no string comparisons.
+    fn compile_builtin_call(
+        &mut self,
+        builtin: Builtin,
+        args: &[NodeId],
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> Option<(Value, ValType)> {
+        match builtin {
+            Builtin::Print => {
+                assert!(args.len() == 1, "print() takes exactly 1 argument");
+                match *self.world.kind(args[0]) {
+                    NodeKind::StringLit(s) => {
+                        let s = s.to_string();
+                        let (data_id, len) = self.get_or_create_string_data(&s);
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let ptr = builder.ins().symbol_value(
+                            self.module.target_config().pointer_type(),
+                            gv,
+                        );
+                        let len_val = builder.ins().iconst(types::I64, len as i64);
+                        builder.ins().call(fn_ctx.print_str_ref, &[ptr, len_val]);
+                    }
+                    NodeKind::BuiltinCall { builtin: Builtin::Arg, args: inner_args } => {
                         assert!(inner_args.len() == 1, "arg() takes exactly 1 argument");
                         let (idx_val, idx_ty) = self.compile_expr(inner_args[0], builder, fn_ctx);
                         let idx_i64 = self.coerce(idx_val, idx_ty, ValType::I64, builder);
@@ -657,61 +682,30 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
                         let ptr_addr = builder.ins().stack_addr(ptr_type, ptr_slot, 0);
                         let len_addr = builder.ins().stack_addr(ptr_type, len_slot, 0);
+                        builder.ins().call(fn_ctx.arg_ref, &[idx_i64, ptr_addr, len_addr]);
 
-                        builder
-                            .ins()
-                            .call(fn_ctx.arg_ref, &[idx_i64, ptr_addr, len_addr]);
-
-                        let str_ptr =
-                            builder
-                                .ins()
-                                .stack_load(ptr_type, ptr_slot, 0);
-                        let str_len =
-                            builder
-                                .ins()
-                                .stack_load(types::I64, len_slot, 0);
-
+                        let str_ptr = builder.ins().stack_load(ptr_type, ptr_slot, 0);
+                        let str_len = builder.ins().stack_load(types::I64, len_slot, 0);
                         builder.ins().call(fn_ctx.print_str_ref, &[str_ptr, str_len]);
-                    } else {
-                        // Regular function call as print argument
-                        let (val, val_ty) = self.compile_call(*callee, inner_args, builder, fn_ctx)
-                            .expect("print argument call must return a value");
+                    }
+                    _ => {
+                        // General expression argument: compile and print as integer
+                        let (val, val_ty) = self.compile_expr(args[0], builder, fn_ctx);
                         let int_val = self.coerce(val, val_ty, ValType::I64, builder);
                         builder.ins().call(fn_ctx.print_int_ref, &[int_val]);
                     }
                 }
-                _ => {
-                    let (val, val_ty) = self.compile_expr(args[0], builder, fn_ctx);
-                    let int_val = self.coerce(val, val_ty, ValType::I64, builder);
-                    builder.ins().call(fn_ctx.print_int_ref, &[int_val]);
-                }
-            }
-            None
-        } else if fn_name == "argc" {
-            assert!(args.is_empty(), "argc() takes no arguments");
-            let call = builder.ins().call(fn_ctx.argc_ref, &[]);
-            let result = builder.inst_results(call)[0];
-            Some((result, ValType::I64))
-        } else if fn_name == "arg" {
-            panic!("arg() can only be used inside print() — the language has no string variable type yet");
-        } else if let Some(&fref) = fn_ctx.func_refs.get(fn_name) {
-            // User-defined function call
-            let mut arg_vals = Vec::new();
-            for &arg_id in args {
-                let (val, _val_ty) = self.compile_expr(arg_id, builder, fn_ctx);
-                arg_vals.push(val);
-            }
-            let call = builder.ins().call(fref, &arg_vals);
-            let results = builder.inst_results(call);
-            if results.is_empty() {
                 None
-            } else {
-                // Determine return type from our user_funcs signature
-                // For now assume i64 for non-void returns
-                Some((results[0], ValType::I64))
             }
-        } else {
-            panic!("unsupported function call: {fn_name}");
+            Builtin::Argc => {
+                assert!(args.is_empty(), "argc() takes no arguments");
+                let call = builder.ins().call(fn_ctx.argc_ref, &[]);
+                let result = builder.inst_results(call)[0];
+                Some((result, ValType::I64))
+            }
+            Builtin::Arg => {
+                panic!("arg() can only be used inside print() — the language has no string variable type yet");
+            }
         }
     }
 
@@ -806,6 +800,10 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             NodeKind::Call { callee, args } => {
                 self.compile_call(callee, args, builder, fn_ctx)
                     .expect("call in expression position must return a value")
+            }
+            NodeKind::BuiltinCall { builtin, args } => {
+                self.compile_builtin_call(builtin, args, builder, fn_ctx)
+                    .expect("builtin call in expression position must return a value")
             }
             _ => panic!("unsupported expression: {:?}", self.world.kind(id)),
         }

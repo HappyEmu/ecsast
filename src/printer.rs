@@ -103,6 +103,12 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
                 print_ast(world, a, indent + 1);
             }
         }
+        NodeKind::BuiltinCall { builtin, args } => {
+            println!("{pad}BuiltinCall({builtin:?}) [{s}..{e}]", s = sp.start, e = sp.end);
+            for &a in *args {
+                print_ast(world, a, indent + 1);
+            }
+        }
         NodeKind::IntLit(n) => {
             println!("{pad}IntLit({n}){ty} [{s}..{e}]", s = sp.start, e = sp.end)
         }

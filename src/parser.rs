@@ -1,6 +1,6 @@
 use bumpalo::Bump;
 
-use crate::ast::{AstWorld, BinOp, NodeId, NodeKind, UnaryOp};
+use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind, UnaryOp};
 use crate::lexer::{Token, TokenKind};
 use crate::span::Span;
 
@@ -461,13 +461,22 @@ impl<'src, 'arena> Parser<'src, 'arena> {
                 }
                 let end = self.peek_token().span.end;
                 self.expect(&TokenKind::RParen);
-                expr = self.world.alloc(
-                    NodeKind::Call {
-                        callee: expr,
-                        args: self.arena.alloc_slice_copy(&args),
-                    },
-                    Span::new(start, end),
-                );
+                let args_slice = self.arena.alloc_slice_copy(&args);
+                // Resolve built-in names at parse time so later stages can
+                // match on an enum variant rather than comparing strings.
+                expr = match *self.world.kind(expr) {
+                    NodeKind::Ident(name) if Builtin::from_name(name).is_some() => {
+                        let builtin = Builtin::from_name(name).unwrap();
+                        self.world.alloc(
+                            NodeKind::BuiltinCall { builtin, args: args_slice },
+                            Span::new(start, end),
+                        )
+                    }
+                    _ => self.world.alloc(
+                        NodeKind::Call { callee: expr, args: args_slice },
+                        Span::new(start, end),
+                    ),
+                };
             } else {
                 break;
             }
@@ -507,7 +516,7 @@ mod tests {
     use bumpalo::Bump;
 
     use super::Parser;
-    use crate::ast::{AstWorld, BinOp, NodeId, NodeKind, UnaryOp};
+    use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind, UnaryOp};
     use crate::lexer::Lexer;
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -1244,15 +1253,15 @@ mod tests {
 
     #[test]
     fn nested_call() {
-        // `print(add(1, 2))` — callee of outer call is `print`, inner is `add`
+        // `print(add(1, 2))` — outer is BuiltinCall(Print), inner is Call("add")
         let arena = Bump::new();
         let (world, root) = parse("fn main() { print(add(1, 2)); }", &arena);
 
         let body = fn_body(&world, first_fn(&world, root));
-        let NodeKind::Call { callee, args } = *world.kind(children(&world, body)[0]) else {
-            panic!()
+        let NodeKind::BuiltinCall { builtin, args } = *world.kind(children(&world, body)[0]) else {
+            panic!("expected BuiltinCall for print")
         };
-        assert!(matches!(*world.kind(callee), NodeKind::Ident("print")));
+        assert_eq!(builtin, Builtin::Print);
         assert_eq!(args.len(), 1);
 
         let NodeKind::Call {
@@ -1260,10 +1269,57 @@ mod tests {
             args: inner_a,
         } = *world.kind(args[0])
         else {
-            panic!("expected inner Call")
+            panic!("expected inner Call for add")
         };
         assert!(matches!(*world.kind(inner_c), NodeKind::Ident("add")));
         assert_eq!(inner_a.len(), 2);
+    }
+
+    #[test]
+    fn builtin_call_print() {
+        // `print(42)` must produce BuiltinCall{Print} not Call
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { print(42); }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::BuiltinCall { builtin, args } = *world.kind(children(&world, body)[0]) else {
+            panic!("expected BuiltinCall")
+        };
+        assert_eq!(builtin, Builtin::Print);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(*world.kind(args[0]), NodeKind::IntLit(42)));
+    }
+
+    #[test]
+    fn builtin_call_argc() {
+        // `argc()` must produce BuiltinCall{Argc} not Call
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { let n: int = argc(); }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::LetStmt { init: Some(expr), .. } = *world.kind(children(&world, body)[0])
+        else {
+            panic!("expected LetStmt")
+        };
+        let NodeKind::BuiltinCall { builtin, args } = *world.kind(expr) else {
+            panic!("expected BuiltinCall")
+        };
+        assert_eq!(builtin, Builtin::Argc);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn user_call_not_treated_as_builtin() {
+        // A user-defined function named something other than a built-in stays Call
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { foo(); }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::Call { callee, args } = *world.kind(children(&world, body)[0]) else {
+            panic!("expected Call for user function")
+        };
+        assert!(matches!(*world.kind(callee), NodeKind::Ident("foo")));
+        assert!(args.is_empty());
     }
 
     // --- literals ---

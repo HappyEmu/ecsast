@@ -72,6 +72,7 @@ pub fn compute_parents(world: &mut AstWorld<'_>, id: NodeId, parent: Option<Node
             ch.extend_from_slice(args);
             ch
         }
+        NodeKind::BuiltinCall { args, .. } => args.to_vec(),
         // Leaves
         NodeKind::IntLit(_)
         | NodeKind::FloatLit(_)
