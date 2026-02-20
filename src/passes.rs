@@ -8,9 +8,9 @@ use crate::ast::{AstWorld, NodeId, NodeKind, TypeInfo};
 // ---------------------------------------------------------------------------
 
 pub fn annotate_literal_types(world: &mut AstWorld<'_>) {
-    let ids: Vec<NodeId> = world.kinds.keys().copied().collect();
+    let ids: Vec<NodeId> = world.kinds.keys().collect();
     for id in ids {
-        let ty = match &world.kinds[&id] {
+        let ty = match &world.kinds[id] {
             NodeKind::IntLit(_) => Some(TypeInfo::Int),
             NodeKind::FloatLit(_) => Some(TypeInfo::Float),
             NodeKind::BoolLit(_) => Some(TypeInfo::Bool),

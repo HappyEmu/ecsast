@@ -121,6 +121,10 @@ impl<'src, 'arena> Parser<'src, 'arena> {
         self.peek_token().span.start
     }
 
+    fn start_of(&self, id: NodeId) -> u32 {
+        self.world.span(id).start
+    }
+
     fn end_of(&self, id: NodeId) -> u32 {
         self.world.span(id).end
     }
@@ -396,7 +400,7 @@ impl<'src, 'arena> Parser<'src, 'arena> {
 
             let rhs = self.parse_binary(r_bp);
 
-            let start = self.world.span(lhs).start;
+            let start = self.start_of(lhs);
             let end = self.end_of(rhs);
             lhs = self
                 .world
@@ -444,7 +448,7 @@ impl<'src, 'arena> Parser<'src, 'arena> {
 
         loop {
             if self.at(&TokenKind::LParen) {
-                let start = self.world.span(expr).start;
+                let start = self.start_of(expr);
                 self.advance(); // `(`
                 let mut args = Vec::new();
                 while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
@@ -1008,10 +1012,7 @@ mod tests {
         };
         assert!(matches!(
             *world.kind(lhs),
-            NodeKind::BinOp {
-                op: BinOp::Add,
-                ..
-            }
+            NodeKind::BinOp { op: BinOp::Add, .. }
         ));
         assert!(matches!(*world.kind(rhs), NodeKind::IntLit(3)));
     }
@@ -1074,10 +1075,7 @@ mod tests {
         assert!(matches!(*world.kind(lhs), NodeKind::IntLit(2)));
         assert!(matches!(
             *world.kind(rhs),
-            NodeKind::BinOp {
-                op: BinOp::Mod,
-                ..
-            }
+            NodeKind::BinOp { op: BinOp::Mod, .. }
         ));
     }
 
@@ -1140,17 +1138,11 @@ mod tests {
         };
         assert!(matches!(
             *world.kind(lhs),
-            NodeKind::BinOp {
-                op: BinOp::Add,
-                ..
-            }
+            NodeKind::BinOp { op: BinOp::Add, .. }
         ));
         assert!(matches!(
             *world.kind(rhs),
-            NodeKind::BinOp {
-                op: BinOp::Sub,
-                ..
-            }
+            NodeKind::BinOp { op: BinOp::Sub, .. }
         ));
     }
 

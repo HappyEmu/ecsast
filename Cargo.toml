@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bumpalo = "3"
+slotmap = "1"
 cranelift-codegen = "0.128"
 cranelift-frontend = "0.128"
 cranelift-module = "0.128"

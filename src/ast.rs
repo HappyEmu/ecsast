@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use slotmap::{SecondaryMap, SlotMap, SparseSecondaryMap};
 
 use crate::span::Span;
 
@@ -6,9 +6,10 @@ use crate::span::Span;
 // Entity
 // ---------------------------------------------------------------------------
 
-/// An AST node entity, identified by a unique integer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(pub u32);
+slotmap::new_key_type! {
+    /// An AST node entity, identified by a slotmap key.
+    pub struct NodeId;
+}
 
 // ---------------------------------------------------------------------------
 // Core component: NodeKind
@@ -140,47 +141,42 @@ pub enum TypeInfo {
 // ---------------------------------------------------------------------------
 
 pub struct AstWorld<'arena> {
-    next_id: u32,
-
     // --- Eagerly populated during parsing ---
-    pub kinds: HashMap<NodeId, NodeKind<'arena>>,
-    pub spans: HashMap<NodeId, Span>,
+    pub kinds: SlotMap<NodeId, NodeKind<'arena>>,
+    pub spans: SecondaryMap<NodeId, Span>,
 
     // --- Lazily populated by later passes ---
     /// Resolved type for a node (type-checker pass).
-    pub types: HashMap<NodeId, TypeInfo>,
+    pub types: SparseSecondaryMap<NodeId, TypeInfo>,
     /// Parent node (parent-link pass).
-    pub parents: HashMap<NodeId, NodeId>,
+    pub parents: SecondaryMap<NodeId, NodeId>,
     /// Name-resolution: `Ident` node → declaration node.
-    pub resolved: HashMap<NodeId, NodeId>,
+    pub resolved: SecondaryMap<NodeId, NodeId>,
 }
 
 impl<'arena> AstWorld<'arena> {
     pub fn new() -> Self {
         Self {
-            next_id: 0,
-            kinds: HashMap::new(),
-            spans: HashMap::new(),
-            types: HashMap::new(),
-            parents: HashMap::new(),
-            resolved: HashMap::new(),
+            kinds: SlotMap::with_key(),
+            spans: SecondaryMap::new(),
+            types: SparseSecondaryMap::new(),
+            parents: SecondaryMap::new(),
+            resolved: SecondaryMap::new(),
         }
     }
 
     /// Allocate a new node with a kind and source span (eagerly populated).
     pub fn alloc(&mut self, kind: NodeKind<'arena>, span: Span) -> NodeId {
-        let id = NodeId(self.next_id);
-        self.next_id += 1;
-        self.kinds.insert(id, kind);
+        let id = self.kinds.insert(kind);
         self.spans.insert(id, span);
         id
     }
 
     pub fn kind(&self, id: NodeId) -> &NodeKind<'arena> {
-        &self.kinds[&id]
+        &self.kinds[id]
     }
 
     pub fn span(&self, id: NodeId) -> Span {
-        self.spans[&id]
+        self.spans[id]
     }
 }

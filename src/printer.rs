@@ -6,7 +6,7 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
     // Show the type annotation if it has been populated by a pass.
     let ty = world
         .types
-        .get(&id)
+        .get(id)
         .map(|t| format!("  :: {t:?}"))
         .unwrap_or_default();
 
