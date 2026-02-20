@@ -371,116 +371,19 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     ) -> bool {
         match *self.world.kind(id) {
             NodeKind::LetStmt { name, ty, init } => {
-                let vt = ty
-                    .map(|t| self.resolve_type_name(t))
-                    .unwrap_or(ValType::I64);
-                let var = builder.declare_var(vt.as_cranelift_type());
-                if let Some(init_id) = init {
-                    let (val, val_ty) = self.compile_expr(init_id, builder, fn_ctx);
-                    let coerced = self.coerce(val, val_ty, vt, builder);
-                    builder.def_var(var, coerced);
-                }
-                fn_ctx.vars.insert(name.to_string(), (var, vt));
-                false
+                self.compile_let_stmt(name, ty, init, builder, fn_ctx)
             }
             NodeKind::AssignStmt { target, value } => {
-                let name = match self.world.kind(target) {
-                    NodeKind::Ident(n) => *n,
-                    _ => panic!("assign target must be ident"),
-                };
-                let (var, vt) = fn_ctx.vars[name];
-                let (val, val_ty) = self.compile_expr(value, builder, fn_ctx);
-                let coerced = self.coerce(val, val_ty, vt, builder);
-                builder.def_var(var, coerced);
-                false
+                self.compile_assign_stmt(target, value, builder, fn_ctx)
             }
-            NodeKind::ReturnStmt(expr) => {
-                if let Some(expr_id) = expr {
-                    let (val, val_ty) = self.compile_expr(expr_id, builder, fn_ctx);
-                    if let Some(ret_ty) = fn_ctx.return_type {
-                        let coerced = self.coerce(val, val_ty, ret_ty, builder);
-                        builder.ins().return_(&[coerced]);
-                    } else {
-                        builder.ins().return_(&[val]);
-                    }
-                } else {
-                    builder.ins().return_(&[]);
-                }
-                true
-            }
+            NodeKind::ReturnStmt(expr) => self.compile_return_stmt(expr, builder, fn_ctx),
             NodeKind::IfStmt {
                 cond,
                 then_block,
                 else_block,
-            } => {
-                let (cond_val, cond_ty) = self.compile_expr(cond, builder, fn_ctx);
-                let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, builder);
-
-                let then_bb = builder.create_block();
-                let else_bb = builder.create_block();
-                let merge_bb = builder.create_block();
-
-                builder.ins().brif(cond_i8, then_bb, &[], else_bb, &[]);
-
-                // Then branch
-                builder.switch_to_block(then_bb);
-                builder.seal_block(then_bb);
-                let then_terminated = self.compile_block(then_block, builder, fn_ctx);
-                if !then_terminated {
-                    builder.ins().jump(merge_bb, &[]);
-                }
-
-                // Else branch
-                builder.switch_to_block(else_bb);
-                builder.seal_block(else_bb);
-                let else_terminated = if let Some(else_id) = else_block {
-                    let t = self.compile_block(else_id, builder, fn_ctx);
-                    if !t {
-                        builder.ins().jump(merge_bb, &[]);
-                    }
-                    t
-                } else {
-                    builder.ins().jump(merge_bb, &[]);
-                    false
-                };
-
-                if then_terminated && else_terminated {
-                    // merge_bb is unreachable, but we still need to seal it
-                    builder.seal_block(merge_bb);
-                    true
-                } else {
-                    builder.switch_to_block(merge_bb);
-                    builder.seal_block(merge_bb);
-                    false
-                }
-            }
+            } => self.compile_if_stmt(cond, then_block, else_block, builder, fn_ctx),
             NodeKind::WhileStmt { cond, body } => {
-                let header_bb = builder.create_block();
-                let body_bb = builder.create_block();
-                let exit_bb = builder.create_block();
-
-                builder.ins().jump(header_bb, &[]);
-
-                builder.switch_to_block(header_bb);
-                // Don't seal header yet — back-edge from body not yet added
-
-                let (cond_val, cond_ty) = self.compile_expr(cond, builder, fn_ctx);
-                let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, builder);
-                builder.ins().brif(cond_i8, body_bb, &[], exit_bb, &[]);
-
-                builder.switch_to_block(body_bb);
-                builder.seal_block(body_bb);
-                let body_terminated = self.compile_block(body, builder, fn_ctx);
-                if !body_terminated {
-                    builder.ins().jump(header_bb, &[]);
-                }
-
-                // Now seal header (predecessors: entry jump + back-edge)
-                builder.seal_block(header_bb);
-
-                builder.switch_to_block(exit_bb);
-                builder.seal_block(exit_bb);
-                false
+                self.compile_while_stmt(cond, body, builder, fn_ctx)
             }
             NodeKind::Call { callee, args } => {
                 self.compile_call(callee, args, builder, fn_ctx);
@@ -492,6 +395,150 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             }
             _ => panic!("unsupported statement: {:?}", self.world.kind(id)),
         }
+    }
+
+    fn compile_let_stmt(
+        &mut self,
+        name: &str,
+        ty: Option<NodeId>,
+        init: Option<NodeId>,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> bool {
+        let vt = ty
+            .map(|t| self.resolve_type_name(t))
+            .unwrap_or(ValType::I64);
+        let var = builder.declare_var(vt.as_cranelift_type());
+        if let Some(init_id) = init {
+            let (val, val_ty) = self.compile_expr(init_id, builder, fn_ctx);
+            let coerced = self.coerce(val, val_ty, vt, builder);
+            builder.def_var(var, coerced);
+        }
+        fn_ctx.vars.insert(name.to_string(), (var, vt));
+        false
+    }
+
+    fn compile_assign_stmt(
+        &mut self,
+        target: NodeId,
+        value: NodeId,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> bool {
+        let name = match self.world.kind(target) {
+            NodeKind::Ident(n) => *n,
+            _ => panic!("assign target must be ident"),
+        };
+        let (var, vt) = fn_ctx.vars[name];
+        let (val, val_ty) = self.compile_expr(value, builder, fn_ctx);
+        let coerced = self.coerce(val, val_ty, vt, builder);
+        builder.def_var(var, coerced);
+        false
+    }
+
+    fn compile_return_stmt(
+        &mut self,
+        expr: Option<NodeId>,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> bool {
+        if let Some(expr_id) = expr {
+            let (val, val_ty) = self.compile_expr(expr_id, builder, fn_ctx);
+            if let Some(ret_ty) = fn_ctx.return_type {
+                let coerced = self.coerce(val, val_ty, ret_ty, builder);
+                builder.ins().return_(&[coerced]);
+            } else {
+                builder.ins().return_(&[val]);
+            }
+        } else {
+            builder.ins().return_(&[]);
+        }
+        true
+    }
+
+    fn compile_if_stmt(
+        &mut self,
+        cond: NodeId,
+        then_block: NodeId,
+        else_block: Option<NodeId>,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> bool {
+        let (cond_val, cond_ty) = self.compile_expr(cond, builder, fn_ctx);
+        let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, builder);
+
+        let then_bb = builder.create_block();
+        let else_bb = builder.create_block();
+        let merge_bb = builder.create_block();
+
+        builder.ins().brif(cond_i8, then_bb, &[], else_bb, &[]);
+
+        // Then branch
+        builder.switch_to_block(then_bb);
+        builder.seal_block(then_bb);
+        let then_terminated = self.compile_block(then_block, builder, fn_ctx);
+        if !then_terminated {
+            builder.ins().jump(merge_bb, &[]);
+        }
+
+        // Else branch
+        builder.switch_to_block(else_bb);
+        builder.seal_block(else_bb);
+        let else_terminated = if let Some(else_id) = else_block {
+            let t = self.compile_block(else_id, builder, fn_ctx);
+            if !t {
+                builder.ins().jump(merge_bb, &[]);
+            }
+            t
+        } else {
+            builder.ins().jump(merge_bb, &[]);
+            false
+        };
+
+        if then_terminated && else_terminated {
+            // merge_bb is unreachable, but we still need to seal it
+            builder.seal_block(merge_bb);
+            true
+        } else {
+            builder.switch_to_block(merge_bb);
+            builder.seal_block(merge_bb);
+            false
+        }
+    }
+
+    fn compile_while_stmt(
+        &mut self,
+        cond: NodeId,
+        body: NodeId,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> bool {
+        let header_bb = builder.create_block();
+        let body_bb = builder.create_block();
+        let exit_bb = builder.create_block();
+
+        builder.ins().jump(header_bb, &[]);
+
+        builder.switch_to_block(header_bb);
+        // Don't seal header yet — back-edge from body not yet added
+
+        let (cond_val, cond_ty) = self.compile_expr(cond, builder, fn_ctx);
+        let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, builder);
+        builder.ins().brif(cond_i8, body_bb, &[], exit_bb, &[]);
+
+        builder.switch_to_block(body_bb);
+        builder.seal_block(body_bb);
+        let body_terminated = self.compile_block(body, builder, fn_ctx);
+        if !body_terminated {
+            builder.ins().jump(header_bb, &[]);
+        }
+
+        // Now seal header (predecessors: entry jump + back-edge)
+        builder.seal_block(header_bb);
+
+        builder.switch_to_block(exit_bb);
+        builder.seal_block(exit_bb);
+        false
     }
 
     /// Compile a call to a user-defined function.
@@ -628,156 +675,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         fn_ctx: &mut FnCtx,
     ) -> (Value, ValType) {
         match *self.world.kind(id) {
-            NodeKind::IntLit(n) => {
-                let val = builder.ins().iconst(types::I64, n);
-                (val, ValType::I64)
-            }
-            NodeKind::FloatLit(f) => {
-                let val = builder.ins().f64const(f);
-                (val, ValType::Float)
-            }
-            NodeKind::BoolLit(b) => {
-                let val = builder.ins().iconst(types::I8, b as i64);
-                (val, ValType::Bool)
-            }
-            NodeKind::Ident(name) => {
-                let (var, vt) = fn_ctx.vars[name];
-                let val = builder.use_var(var);
-                (val, vt)
-            }
-            NodeKind::BinOp { op, lhs, rhs } => {
-                let (l, l_ty) = self.compile_expr(lhs, builder, fn_ctx);
-                let (r, r_ty) = self.compile_expr(rhs, builder, fn_ctx);
-
-                let is_float = l_ty == ValType::Float || r_ty == ValType::Float;
-                match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                        if is_float {
-                            if op == BinOp::Mod {
-                                let call = builder
-                                    .ins()
-                                    .call(fn_ctx.runtime[&RuntimeFn::FMod], &[l, r]);
-                                let result = builder.inst_results(call)[0];
-                                return (result, ValType::Float);
-                            }
-                            let result = match op {
-                                BinOp::Add => builder.ins().fadd(l, r),
-                                BinOp::Sub => builder.ins().fsub(l, r),
-                                BinOp::Mul => builder.ins().fmul(l, r),
-                                BinOp::Div => builder.ins().fdiv(l, r),
-                                _ => unreachable!(),
-                            };
-                            (result, ValType::Float)
-                        } else {
-                            let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                            let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                            let result = match op {
-                                BinOp::Add => builder.ins().iadd(l64, r64),
-                                BinOp::Sub => builder.ins().isub(l64, r64),
-                                BinOp::Mul => builder.ins().imul(l64, r64),
-                                BinOp::Div => builder.ins().sdiv(l64, r64),
-                                BinOp::Mod => builder.ins().srem(l64, r64),
-                                _ => unreachable!(),
-                            };
-                            (result, ValType::I64)
-                        }
-                    }
-                    BinOp::Pow => {
-                        if is_float {
-                            let call = builder
-                                .ins()
-                                .call(fn_ctx.runtime[&RuntimeFn::FPow], &[l, r]);
-                            let result = builder.inst_results(call)[0];
-                            (result, ValType::Float)
-                        } else {
-                            let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                            let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                            let call = builder
-                                .ins()
-                                .call(fn_ctx.runtime[&RuntimeFn::IPow], &[l64, r64]);
-                            let result = builder.inst_results(call)[0];
-                            (result, ValType::I64)
-                        }
-                    }
-                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                        if is_float {
-                            let cc = match op {
-                                BinOp::Eq => FloatCC::Equal,
-                                BinOp::Ne => FloatCC::NotEqual,
-                                BinOp::Lt => FloatCC::LessThan,
-                                BinOp::Le => FloatCC::LessThanOrEqual,
-                                BinOp::Gt => FloatCC::GreaterThan,
-                                BinOp::Ge => FloatCC::GreaterThanOrEqual,
-                                _ => unreachable!(),
-                            };
-                            let result = builder.ins().fcmp(cc, l, r);
-                            (result, ValType::Bool)
-                        } else {
-                            let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                            let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                            let cc = match op {
-                                BinOp::Eq => IntCC::Equal,
-                                BinOp::Ne => IntCC::NotEqual,
-                                BinOp::Lt => IntCC::SignedLessThan,
-                                BinOp::Le => IntCC::SignedLessThanOrEqual,
-                                BinOp::Gt => IntCC::SignedGreaterThan,
-                                BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
-                                _ => unreachable!(),
-                            };
-                            let result = builder.ins().icmp(cc, l64, r64);
-                            (result, ValType::Bool)
-                        }
-                    }
-                    BinOp::And | BinOp::Or => {
-                        let lb = self.coerce(l, l_ty, ValType::Bool, builder);
-                        let rb = self.coerce(r, r_ty, ValType::Bool, builder);
-                        let result = match op {
-                            BinOp::And => builder.ins().band(lb, rb),
-                            BinOp::Or => builder.ins().bor(lb, rb),
-                            _ => unreachable!(),
-                        };
-                        (result, ValType::Bool)
-                    }
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
-                        let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                        let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                        let result = match op {
-                            BinOp::BitAnd => builder.ins().band(l64, r64),
-                            BinOp::BitOr => builder.ins().bor(l64, r64),
-                            BinOp::BitXor => builder.ins().bxor(l64, r64),
-                            BinOp::Shl => builder.ins().ishl(l64, r64),
-                            BinOp::Shr => builder.ins().sshr(l64, r64),
-                            _ => unreachable!(),
-                        };
-                        (result, ValType::I64)
-                    }
-                }
-            }
+            NodeKind::IntLit(n) => self.compile_int_lit(n, builder),
+            NodeKind::FloatLit(f) => self.compile_float_lit(f, builder),
+            NodeKind::BoolLit(b) => self.compile_bool_lit(b, builder),
+            NodeKind::Ident(name) => self.compile_ident(name, fn_ctx, builder),
+            NodeKind::BinOp { op, lhs, rhs } => self.compile_bin_op(op, lhs, rhs, builder, fn_ctx),
             NodeKind::UnaryOp { op, operand } => {
-                let (val, vt) = self.compile_expr(operand, builder, fn_ctx);
-                match op {
-                    crate::ast::UnaryOp::Neg => {
-                        if vt == ValType::Float {
-                            let result = builder.ins().fneg(val);
-                            (result, ValType::Float)
-                        } else {
-                            let v64 = self.coerce(val, vt, ValType::I64, builder);
-                            let result = builder.ins().ineg(v64);
-                            (result, ValType::I64)
-                        }
-                    }
-                    crate::ast::UnaryOp::Not => {
-                        let vb = self.coerce(val, vt, ValType::Bool, builder);
-                        let one = builder.ins().iconst(types::I8, 1);
-                        let result = builder.ins().bxor(vb, one);
-                        (result, ValType::Bool)
-                    }
-                    crate::ast::UnaryOp::BitNot => {
-                        let v64 = self.coerce(val, vt, ValType::I64, builder);
-                        let result = builder.ins().bnot(v64);
-                        (result, ValType::I64)
-                    }
-                }
+                self.compile_unary_op(op, operand, builder, fn_ctx)
             }
             NodeKind::Call { callee, args } => self
                 .compile_call(callee, args, builder, fn_ctx)
@@ -786,6 +690,181 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 .compile_builtin_call(builtin, args, builder, fn_ctx)
                 .expect("builtin call in expression position must return a value"),
             _ => panic!("unsupported expression: {:?}", self.world.kind(id)),
+        }
+    }
+
+    fn compile_int_lit(&self, n: i64, builder: &mut FunctionBuilder) -> (Value, ValType) {
+        let val = builder.ins().iconst(types::I64, n);
+        (val, ValType::I64)
+    }
+
+    fn compile_float_lit(&self, f: f64, builder: &mut FunctionBuilder) -> (Value, ValType) {
+        let val = builder.ins().f64const(f);
+        (val, ValType::Float)
+    }
+
+    fn compile_bool_lit(&self, b: bool, builder: &mut FunctionBuilder) -> (Value, ValType) {
+        let val = builder.ins().iconst(types::I8, b as i64);
+        (val, ValType::Bool)
+    }
+
+    fn compile_ident(
+        &self,
+        name: &str,
+        fn_ctx: &mut FnCtx,
+        builder: &mut FunctionBuilder,
+    ) -> (Value, ValType) {
+        let (var, vt) = fn_ctx.vars[name];
+        let val = builder.use_var(var);
+        (val, vt)
+    }
+
+    fn compile_bin_op(
+        &mut self,
+        op: BinOp,
+        lhs: NodeId,
+        rhs: NodeId,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> (Value, ValType) {
+        let (l, l_ty) = self.compile_expr(lhs, builder, fn_ctx);
+        let (r, r_ty) = self.compile_expr(rhs, builder, fn_ctx);
+
+        let is_float = l_ty == ValType::Float || r_ty == ValType::Float;
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                if is_float {
+                    if op == BinOp::Mod {
+                        let call = builder
+                            .ins()
+                            .call(fn_ctx.runtime[&RuntimeFn::FMod], &[l, r]);
+                        let result = builder.inst_results(call)[0];
+                        return (result, ValType::Float);
+                    }
+                    let result = match op {
+                        BinOp::Add => builder.ins().fadd(l, r),
+                        BinOp::Sub => builder.ins().fsub(l, r),
+                        BinOp::Mul => builder.ins().fmul(l, r),
+                        BinOp::Div => builder.ins().fdiv(l, r),
+                        _ => unreachable!(),
+                    };
+                    (result, ValType::Float)
+                } else {
+                    let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                    let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                    let result = match op {
+                        BinOp::Add => builder.ins().iadd(l64, r64),
+                        BinOp::Sub => builder.ins().isub(l64, r64),
+                        BinOp::Mul => builder.ins().imul(l64, r64),
+                        BinOp::Div => builder.ins().sdiv(l64, r64),
+                        BinOp::Mod => builder.ins().srem(l64, r64),
+                        _ => unreachable!(),
+                    };
+                    (result, ValType::I64)
+                }
+            }
+            BinOp::Pow => {
+                if is_float {
+                    let call = builder
+                        .ins()
+                        .call(fn_ctx.runtime[&RuntimeFn::FPow], &[l, r]);
+                    let result = builder.inst_results(call)[0];
+                    (result, ValType::Float)
+                } else {
+                    let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                    let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                    let call = builder
+                        .ins()
+                        .call(fn_ctx.runtime[&RuntimeFn::IPow], &[l64, r64]);
+                    let result = builder.inst_results(call)[0];
+                    (result, ValType::I64)
+                }
+            }
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                if is_float {
+                    let cc = match op {
+                        BinOp::Eq => FloatCC::Equal,
+                        BinOp::Ne => FloatCC::NotEqual,
+                        BinOp::Lt => FloatCC::LessThan,
+                        BinOp::Le => FloatCC::LessThanOrEqual,
+                        BinOp::Gt => FloatCC::GreaterThan,
+                        BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                        _ => unreachable!(),
+                    };
+                    let result = builder.ins().fcmp(cc, l, r);
+                    (result, ValType::Bool)
+                } else {
+                    let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                    let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                    let cc = match op {
+                        BinOp::Eq => IntCC::Equal,
+                        BinOp::Ne => IntCC::NotEqual,
+                        BinOp::Lt => IntCC::SignedLessThan,
+                        BinOp::Le => IntCC::SignedLessThanOrEqual,
+                        BinOp::Gt => IntCC::SignedGreaterThan,
+                        BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                        _ => unreachable!(),
+                    };
+                    let result = builder.ins().icmp(cc, l64, r64);
+                    (result, ValType::Bool)
+                }
+            }
+            BinOp::And | BinOp::Or => {
+                let lb = self.coerce(l, l_ty, ValType::Bool, builder);
+                let rb = self.coerce(r, r_ty, ValType::Bool, builder);
+                let result = match op {
+                    BinOp::And => builder.ins().band(lb, rb),
+                    BinOp::Or => builder.ins().bor(lb, rb),
+                    _ => unreachable!(),
+                };
+                (result, ValType::Bool)
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                let result = match op {
+                    BinOp::BitAnd => builder.ins().band(l64, r64),
+                    BinOp::BitOr => builder.ins().bor(l64, r64),
+                    BinOp::BitXor => builder.ins().bxor(l64, r64),
+                    BinOp::Shl => builder.ins().ishl(l64, r64),
+                    BinOp::Shr => builder.ins().sshr(l64, r64),
+                    _ => unreachable!(),
+                };
+                (result, ValType::I64)
+            }
+        }
+    }
+
+    fn compile_unary_op(
+        &mut self,
+        op: crate::ast::UnaryOp,
+        operand: NodeId,
+        builder: &mut FunctionBuilder,
+        fn_ctx: &mut FnCtx,
+    ) -> (Value, ValType) {
+        let (val, vt) = self.compile_expr(operand, builder, fn_ctx);
+        match op {
+            crate::ast::UnaryOp::Neg => {
+                if vt == ValType::Float {
+                    let result = builder.ins().fneg(val);
+                    (result, ValType::Float)
+                } else {
+                    let v64 = self.coerce(val, vt, ValType::I64, builder);
+                    let result = builder.ins().ineg(v64);
+                    (result, ValType::I64)
+                }
+            }
+            crate::ast::UnaryOp::Not => {
+                let vb = self.coerce(val, vt, ValType::Bool, builder);
+                let one = builder.ins().iconst(types::I8, 1);
+                let result = builder.ins().bxor(vb, one);
+                (result, ValType::Bool)
+            }
+            crate::ast::UnaryOp::BitNot => {
+                let v64 = self.coerce(val, vt, ValType::I64, builder);
+                let result = builder.ins().bnot(v64);
+                (result, ValType::I64)
+            }
         }
     }
 
