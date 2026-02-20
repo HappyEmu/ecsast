@@ -38,6 +38,14 @@ pub enum TokenKind {
     Gt,
     GtEq,
 
+    // Bitwise operators
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    LtLt,
+    GtGt,
+
     // Logical operators
     AmpAmp,
     PipePipe,
@@ -197,7 +205,10 @@ impl<'a> Lexer<'a> {
             }
             '<' => {
                 self.advance();
-                if self.peek() == Some('=') {
+                if self.peek() == Some('<') {
+                    self.advance();
+                    TokenKind::LtLt
+                } else if self.peek() == Some('=') {
                     self.advance();
                     TokenKind::LtEq
                 } else {
@@ -206,7 +217,10 @@ impl<'a> Lexer<'a> {
             }
             '>' => {
                 self.advance();
-                if self.peek() == Some('=') {
+                if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::GtGt
+                } else if self.peek() == Some('=') {
                     self.advance();
                     TokenKind::GtEq
                 } else {
@@ -219,7 +233,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     TokenKind::AmpAmp
                 } else {
-                    panic!("unexpected lone '&' at byte {}", self.pos)
+                    TokenKind::Amp
                 }
             }
             '|' => {
@@ -228,8 +242,16 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     TokenKind::PipePipe
                 } else {
-                    panic!("unexpected lone '|' at byte {}", self.pos)
+                    TokenKind::Pipe
                 }
+            }
+            '^' => {
+                self.advance();
+                TokenKind::Caret
+            }
+            '~' => {
+                self.advance();
+                TokenKind::Tilde
             }
             ':' => {
                 self.advance();

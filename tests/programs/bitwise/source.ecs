@@ -1,0 +1,23 @@
+fn main() {
+    let a: int = 12;
+    let b: int = 10;
+
+    // Basic bitwise ops: 12 = 1100b, 10 = 1010b
+    print(a & b);    // 8  (1000b)
+    print(a | b);    // 14 (1110b)
+    print(a ^ b);    // 6  (0110b)
+    print(~a);       // -13 (bitwise NOT of 12 in two's complement)
+
+    // Shifts
+    print(1 << 3);   // 8
+    print(16 >> 2);  // 4
+
+    // Precedence: & binds tighter than |
+    print(1 | 2 & 4);  // 1 | (2 & 4) = 1 | 0 = 1
+
+    // Precedence: ^ between | and &
+    print(3 ^ 5 | 8);  // (3 ^ 5) | 8 = 6 | 8 = 14
+
+    // + binds tighter than << (same as C)
+    print(1 + 1 << 2);  // (1 + 1) << 2 = 2 << 2 = 8
+}

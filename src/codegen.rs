@@ -841,6 +841,19 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         };
                         (result, ValType::Bool)
                     }
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                        let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                        let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                        let result = match op {
+                            BinOp::BitAnd => builder.ins().band(l64, r64),
+                            BinOp::BitOr  => builder.ins().bor(l64, r64),
+                            BinOp::BitXor => builder.ins().bxor(l64, r64),
+                            BinOp::Shl    => builder.ins().ishl(l64, r64),
+                            BinOp::Shr    => builder.ins().sshr(l64, r64),
+                            _ => unreachable!(),
+                        };
+                        (result, ValType::I64)
+                    }
                 }
             }
             NodeKind::UnaryOp { op, operand } => {
@@ -861,6 +874,11 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         let one = builder.ins().iconst(types::I8, 1);
                         let result = builder.ins().bxor(vb, one);
                         (result, ValType::Bool)
+                    }
+                    crate::ast::UnaryOp::BitNot => {
+                        let v64 = self.coerce(val, vt, ValType::I64, builder);
+                        let result = builder.ins().bnot(v64);
+                        (result, ValType::I64)
                     }
                 }
             }
