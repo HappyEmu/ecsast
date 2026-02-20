@@ -75,3 +75,8 @@ fn nested_loops() {
 fn add() {
     run_interpreter_test("add");
 }
+
+#[test]
+fn stress() {
+    run_interpreter_test("stress");
+}

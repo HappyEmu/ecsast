@@ -100,3 +100,8 @@ fn add() {
 fn args() {
     run_program_test_with_args("args", &["hello", "world"]);
 }
+
+#[test]
+fn stress() {
+    run_program_test("stress");
+}
