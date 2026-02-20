@@ -4,7 +4,7 @@ ECSAST - A Language Compiler Using ECS for the AST
 ECSAST is a small compiled language implemented in Rust. Its distinguishing
 feature is that the Abstract Syntax Tree uses an Entity-Component-System (ECS)
 pattern: every AST node is just an ID, and all data about nodes lives in
-separate hash-map stores (kinds, spans, types, etc.).
+separate slotmap stores (kinds, spans, types, etc.).
 
 The compiler produces native binaries via Cranelift.
 
@@ -166,12 +166,27 @@ Architecture Note: Why ECS?
 
 Traditional compilers store AST data directly in tree nodes. ECSAST instead
 gives each node just an integer ID (NodeId) and stores all properties in
-separate HashMap<NodeId, X> "component stores":
+separate slotmap "component stores":
 
-    kinds:    what kind of node it is (FnDecl, BinOp, IfStmt, etc.)
-    spans:    source location (byte range)
-    types:    type information (filled by analysis passes)
-    parents:  parent pointers (filled by analysis passes)
+    kinds:    SlotMap<NodeId, NodeKind>          — what kind of node it is
+    spans:    SecondaryMap<NodeId, Span>          — source location (byte range)
+    types:    SparseSecondaryMap<NodeId, TypeInfo>— type info (filled by passes)
+    parents:  SecondaryMap<NodeId, NodeId>        — parent pointers (filled by passes)
+
+SlotMap is used instead of HashMap for two reasons:
+
+  1. Performance: SlotMap uses a dense array indexed by the slot's integer
+     index, so lookups are O(1) without any hashing. SecondaryMap (used for
+     eagerly-populated stores like spans) shares the same layout and is
+     equally fast. SparseSecondaryMap (used for sparsely-populated stores
+     like types) falls back to a hash map internally but is still keyed by
+     the same NodeId type.
+
+  2. Safety: SlotMap keys carry a generation counter. If a node were ever
+     removed and its slot reused, any old NodeId would be detected as stale
+     rather than silently returning the wrong node. This prevents a class of
+     dangling-reference bugs at zero runtime cost for the common (no-removal)
+     case.
 
 This makes it easy to add new compiler passes without modifying existing
 data structures — each pass just writes to its own store.
