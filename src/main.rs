@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use bumpalo::Bump;
 use clap::{Parser as ClapParser, ValueEnum};
@@ -40,6 +41,10 @@ struct Cli {
     /// Optimization level
     #[arg(short = 'O', long = "opt-level", default_value = "none")]
     opt_level: CliOptLevel,
+
+    /// Print timing diagnostics for each compilation phase
+    #[arg(long)]
+    time: bool,
 }
 
 fn main() {
@@ -50,16 +55,29 @@ fn main() {
         std::process::exit(1);
     });
 
+    let t0 = Instant::now();
     let tokens = Lexer::new(&src).tokenize();
+    let lex_time = t0.elapsed();
 
     let arena = Bump::new();
     let mut parser = Parser::new(&tokens, &arena);
+    let t1 = Instant::now();
     let root = parser.parse_program();
+    let parse_time = t1.elapsed();
     let world = parser.world;
 
     let output = cli.output.to_str().expect("invalid output path");
+    let t2 = Instant::now();
     codegen::compile_to_executable(&world, root, output, cli.opt_level.into())
         .expect("compilation failed");
+    let codegen_time = t2.elapsed();
 
     println!("Compiled {} -> {output}", cli.file.display());
+
+    if cli.time {
+        eprintln!("  lex:     {lex_time:>10.3?}");
+        eprintln!("  parse:   {parse_time:>10.3?}");
+        eprintln!("  codegen: {codegen_time:>10.3?}");
+        eprintln!("  total:   {:>10.3?}", lex_time + parse_time + codegen_time);
+    }
 }

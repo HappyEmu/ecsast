@@ -73,26 +73,31 @@ pub struct Token {
 
 pub struct Lexer<'a> {
     src: &'a str,
+    chars: std::str::Chars<'a>,
     pos: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Self { src, pos: 0 }
+        Self {
+            src,
+            chars: src.chars(),
+            pos: 0,
+        }
     }
 
     fn peek(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
+        self.chars.clone().next()
     }
 
     fn peek2(&self) -> Option<char> {
-        let mut it = self.src[self.pos..].chars();
+        let mut it = self.chars.clone();
         it.next();
         it.next()
     }
 
     fn advance(&mut self) -> Option<char> {
-        let c = self.src[self.pos..].chars().next()?;
+        let c = self.chars.next()?;
         self.pos += c.len_utf8();
         Some(c)
     }
