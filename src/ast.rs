@@ -196,6 +196,12 @@ pub struct AstWorld<'arena> {
     pub resolved: SecondaryMap<NodeId, NodeId>,
 }
 
+impl<'arena> Default for AstWorld<'arena> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'arena> AstWorld<'arena> {
     pub fn new() -> Self {
         Self {
