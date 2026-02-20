@@ -6,6 +6,6 @@ pub mod lexer;
 pub mod parser;
 pub mod span;
 
-mod interpreter;
+pub mod interpreter;
 mod passes;
 mod printer;
