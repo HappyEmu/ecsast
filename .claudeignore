@@ -1,0 +1,2 @@
+stress/*.ecs
+tests/programs/stress*/source.ecs
