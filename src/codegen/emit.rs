@@ -50,7 +50,8 @@ pub struct Compiler<'a, 'arena> {
     inline_bodies: HashMap<FuncId, Function>,
 }
 
-struct FnCtx {
+struct BuildCtx<'a> {
+    builder: FunctionBuilder<'a>,
     vars: HashMap<String, (Variable, ValType)>,
     runtime: HashMap<RuntimeFn, FuncRef>,
     func_refs: HashMap<String, FuncRef>,
@@ -185,9 +186,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             } = *self.world.kind(id)
             {
                 if name == "main" {
-                    self.define_main(body, items, &mut func_ctx)?;
+                    self.define_main(body, &mut func_ctx)?;
                 } else {
-                    self.define_user_func(name, params, ret_ty, body, items, &mut func_ctx)?;
+                    self.define_user_func(name, params, ret_ty, body, &mut func_ctx)?;
                 }
             }
         }
@@ -198,43 +199,45 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     fn define_main(
         &mut self,
         body: NodeId,
-        items: &[NodeId],
         func_ctx: &mut FunctionBuilderContext,
     ) -> Result<(), Box<dyn Error>> {
-        let ptr_type = self.module.target_config().pointer_type();
-        let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I32)); // argc
-        sig.params.push(AbiParam::new(ptr_type)); // argv
-        sig.returns.push(AbiParam::new(types::I32));
-        let main_func_id = self
-            .module
-            .declare_function("main", Linkage::Export, &sig)?;
+        let (main_func_id, sig) = {
+            let ptr_type = self.module.target_config().pointer_type();
+
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // argc
+            sig.params.push(AbiParam::new(ptr_type)); // argv
+            sig.returns.push(AbiParam::new(types::I32));
+
+            let func_id = self
+                .module
+                .declare_function("main", Linkage::Export, &sig)?;
+
+            (func_id, sig)
+        };
 
         let mut func = Function::with_name_signature(UserFuncName::default(), sig);
         {
-            let mut builder = FunctionBuilder::new(&mut func, func_ctx);
-            let entry = builder.create_block();
-            builder.append_block_params_for_function_params(entry);
-            builder.switch_to_block(entry);
-            builder.seal_block(entry);
-
-            let mut fn_ctx = self.make_fn_ctx(&mut builder, items, None);
+            let mut ctx = self.make_build_ctx(&mut func, func_ctx, None);
+            let entry = ctx.builder.create_block();
+            ctx.builder.append_block_params_for_function_params(entry);
+            ctx.builder.switch_to_block(entry);
+            ctx.builder.seal_block(entry);
 
             // Call ecsast_init_args(argc, argv) at entry
-            let argc_param = builder.block_params(entry)[0];
-            let argv_param = builder.block_params(entry)[1];
-            builder.ins().call(
-                fn_ctx.runtime[&RuntimeFn::InitArgs],
-                &[argc_param, argv_param],
-            );
+            let argc_param = ctx.builder.block_params(entry)[0];
+            let argv_param = ctx.builder.block_params(entry)[1];
+            ctx.builder
+                .ins()
+                .call(ctx.runtime[&RuntimeFn::InitArgs], &[argc_param, argv_param]);
 
-            let terminated = self.compile_block(body, &mut builder, &mut fn_ctx);
+            let terminated = self.compile_block(body, &mut ctx);
 
             if !terminated {
-                let zero = builder.ins().iconst(types::I32, 0);
-                builder.ins().return_(&[zero]);
+                let zero = ctx.builder.ins().iconst(types::I32, 0);
+                ctx.builder.ins().return_(&[zero]);
             }
-            builder.finalize();
+            ctx.builder.finalize();
         }
 
         let mut ctx = Context::for_function(func);
@@ -244,7 +247,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             };
             ctx.inline(&mut inliner)?;
         }
+
         self.module.define_function(main_func_id, &mut ctx)?;
+
         Ok(())
     }
 
@@ -254,7 +259,6 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         params: &[NodeId],
         ret_ty: Option<NodeId>,
         body: NodeId,
-        items: &[NodeId],
         func_ctx: &mut FunctionBuilderContext,
     ) -> Result<(), Box<dyn Error>> {
         let func_id = self.user_funcs[name];
@@ -267,14 +271,12 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
         let mut func = Function::with_name_signature(UserFuncName::default(), sig.clone());
         {
-            let mut builder = FunctionBuilder::new(&mut func, func_ctx);
-            let entry = builder.create_block();
-            builder.append_block_params_for_function_params(entry);
-            builder.switch_to_block(entry);
-            builder.seal_block(entry);
-
             let return_type = ret_ty.map(|id| self.resolve_type_name(id));
-            let mut fn_ctx = self.make_fn_ctx(&mut builder, items, return_type);
+            let mut ctx = self.make_build_ctx(&mut func, func_ctx, return_type);
+            let entry = ctx.builder.create_block();
+            ctx.builder.append_block_params_for_function_params(entry);
+            ctx.builder.switch_to_block(entry);
+            ctx.builder.seal_block(entry);
 
             // Bind parameters to variables
             for (i, &param_id) in params.iter().enumerate() {
@@ -284,20 +286,20 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 } = *self.world.kind(param_id)
                 {
                     let vt = self.resolve_type_name(ty_id);
-                    let var = builder.declare_var(vt.as_cranelift_type());
-                    let val = builder.block_params(entry)[i];
-                    builder.def_var(var, val);
-                    fn_ctx.vars.insert(pname.to_string(), (var, vt));
+                    let var = ctx.builder.declare_var(vt.as_cranelift_type());
+                    let val = ctx.builder.block_params(entry)[i];
+                    ctx.builder.def_var(var, val);
+                    ctx.vars.insert(pname.to_string(), (var, vt));
                 }
             }
 
-            let terminated = self.compile_block(body, &mut builder, &mut fn_ctx);
+            let terminated = self.compile_block(body, &mut ctx);
 
             if !terminated {
                 // void functions: return nothing (shouldn't happen for int-returning fns)
-                builder.ins().return_(&[]);
+                ctx.builder.ins().return_(&[]);
             }
-            builder.finalize();
+            ctx.builder.finalize();
         }
 
         let is_inline = self.inline_funcs.contains(name);
@@ -312,16 +314,19 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             };
             ctx.inline(&mut inliner)?;
         }
+
         self.module.define_function(func_id, &mut ctx)?;
+
         Ok(())
     }
 
-    fn make_fn_ctx(
+    fn make_build_ctx<'b>(
         &mut self,
-        builder: &mut FunctionBuilder,
-        _items: &[NodeId],
+        func: &'b mut Function,
+        func_ctx: &'b mut FunctionBuilderContext,
         return_type: Option<ValType>,
-    ) -> FnCtx {
+    ) -> BuildCtx<'b> {
+        let builder = FunctionBuilder::new(func, func_ctx);
         let runtime = self
             .runtime_ids
             .iter()
@@ -334,7 +339,8 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             func_refs.insert(name.clone(), fref);
         }
 
-        FnCtx {
+        BuildCtx {
+            builder,
             vars: HashMap::new(),
             runtime,
             func_refs,
@@ -343,54 +349,40 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     }
 
     /// Compile a block. Returns true if the block is terminated (ends with return).
-    fn compile_block(
-        &mut self,
-        block_id: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
-    ) -> bool {
+    fn compile_block(&mut self, block_id: NodeId, ctx: &mut BuildCtx) -> bool {
         let stmts = match self.world.kind(block_id) {
             NodeKind::Block(stmts) => *stmts,
             _ => panic!("expected Block node"),
         };
+
         for &stmt_id in stmts {
-            let terminated = self.compile_stmt(stmt_id, builder, fn_ctx);
+            let terminated = self.compile_stmt(stmt_id, ctx);
             if terminated {
                 return true;
             }
         }
+
         false
     }
 
     /// Compile a statement. Returns true if the current block is terminated.
-    fn compile_stmt(
-        &mut self,
-        id: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
-    ) -> bool {
+    fn compile_stmt(&mut self, id: NodeId, ctx: &mut BuildCtx) -> bool {
         match *self.world.kind(id) {
-            NodeKind::LetStmt { name, ty, init } => {
-                self.compile_let_stmt(name, ty, init, builder, fn_ctx)
-            }
-            NodeKind::AssignStmt { target, value } => {
-                self.compile_assign_stmt(target, value, builder, fn_ctx)
-            }
-            NodeKind::ReturnStmt(expr) => self.compile_return_stmt(expr, builder, fn_ctx),
+            NodeKind::LetStmt { name, ty, init } => self.compile_let_stmt(name, ty, init, ctx),
+            NodeKind::AssignStmt { target, value } => self.compile_assign_stmt(target, value, ctx),
+            NodeKind::ReturnStmt(expr) => self.compile_return_stmt(expr, ctx),
             NodeKind::IfStmt {
                 cond,
                 then_block,
                 else_block,
-            } => self.compile_if_stmt(cond, then_block, else_block, builder, fn_ctx),
-            NodeKind::WhileStmt { cond, body } => {
-                self.compile_while_stmt(cond, body, builder, fn_ctx)
-            }
+            } => self.compile_if_stmt(cond, then_block, else_block, ctx),
+            NodeKind::WhileStmt { cond, body } => self.compile_while_stmt(cond, body, ctx),
             NodeKind::Call { callee, args } => {
-                self.compile_call(callee, args, builder, fn_ctx);
+                self.compile_call(callee, args, ctx);
                 false
             }
             NodeKind::BuiltinCall { builtin, args } => {
-                self.compile_builtin_call(builtin, args, builder, fn_ctx);
+                self.compile_builtin_call(builtin, args, ctx);
                 false
             }
             _ => panic!("unsupported statement: {:?}", self.world.kind(id)),
@@ -402,56 +394,44 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         name: &str,
         ty: Option<NodeId>,
         init: Option<NodeId>,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
+        ctx: &mut BuildCtx,
     ) -> bool {
         let vt = ty
             .map(|t| self.resolve_type_name(t))
             .unwrap_or(ValType::I64);
-        let var = builder.declare_var(vt.as_cranelift_type());
+        let var = ctx.builder.declare_var(vt.as_cranelift_type());
         if let Some(init_id) = init {
-            let (val, val_ty) = self.compile_expr(init_id, builder, fn_ctx);
-            let coerced = self.coerce(val, val_ty, vt, builder);
-            builder.def_var(var, coerced);
+            let (val, val_ty) = self.compile_expr(init_id, ctx);
+            let coerced = self.coerce(val, val_ty, vt, ctx);
+            ctx.builder.def_var(var, coerced);
         }
-        fn_ctx.vars.insert(name.to_string(), (var, vt));
+        ctx.vars.insert(name.to_string(), (var, vt));
         false
     }
 
-    fn compile_assign_stmt(
-        &mut self,
-        target: NodeId,
-        value: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
-    ) -> bool {
+    fn compile_assign_stmt(&mut self, target: NodeId, value: NodeId, ctx: &mut BuildCtx) -> bool {
         let name = match self.world.kind(target) {
             NodeKind::Ident(n) => *n,
             _ => panic!("assign target must be ident"),
         };
-        let (var, vt) = fn_ctx.vars[name];
-        let (val, val_ty) = self.compile_expr(value, builder, fn_ctx);
-        let coerced = self.coerce(val, val_ty, vt, builder);
-        builder.def_var(var, coerced);
+        let (var, vt) = ctx.vars[name];
+        let (val, val_ty) = self.compile_expr(value, ctx);
+        let coerced = self.coerce(val, val_ty, vt, ctx);
+        ctx.builder.def_var(var, coerced);
         false
     }
 
-    fn compile_return_stmt(
-        &mut self,
-        expr: Option<NodeId>,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
-    ) -> bool {
+    fn compile_return_stmt(&mut self, expr: Option<NodeId>, ctx: &mut BuildCtx) -> bool {
         if let Some(expr_id) = expr {
-            let (val, val_ty) = self.compile_expr(expr_id, builder, fn_ctx);
-            if let Some(ret_ty) = fn_ctx.return_type {
-                let coerced = self.coerce(val, val_ty, ret_ty, builder);
-                builder.ins().return_(&[coerced]);
+            let (val, val_ty) = self.compile_expr(expr_id, ctx);
+            if let Some(ret_ty) = ctx.return_type {
+                let coerced = self.coerce(val, val_ty, ret_ty, ctx);
+                ctx.builder.ins().return_(&[coerced]);
             } else {
-                builder.ins().return_(&[val]);
+                ctx.builder.ins().return_(&[val]);
             }
         } else {
-            builder.ins().return_(&[]);
+            ctx.builder.ins().return_(&[]);
         }
         true
     }
@@ -461,83 +441,76 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         cond: NodeId,
         then_block: NodeId,
         else_block: Option<NodeId>,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
+        ctx: &mut BuildCtx,
     ) -> bool {
-        let (cond_val, cond_ty) = self.compile_expr(cond, builder, fn_ctx);
-        let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, builder);
+        let (cond_val, cond_ty) = self.compile_expr(cond, ctx);
+        let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, ctx);
 
-        let then_bb = builder.create_block();
-        let else_bb = builder.create_block();
-        let merge_bb = builder.create_block();
+        let then_bb = ctx.builder.create_block();
+        let else_bb = ctx.builder.create_block();
+        let merge_bb = ctx.builder.create_block();
 
-        builder.ins().brif(cond_i8, then_bb, &[], else_bb, &[]);
+        ctx.builder.ins().brif(cond_i8, then_bb, &[], else_bb, &[]);
 
         // Then branch
-        builder.switch_to_block(then_bb);
-        builder.seal_block(then_bb);
-        let then_terminated = self.compile_block(then_block, builder, fn_ctx);
+        ctx.builder.switch_to_block(then_bb);
+        ctx.builder.seal_block(then_bb);
+        let then_terminated = self.compile_block(then_block, ctx);
         if !then_terminated {
-            builder.ins().jump(merge_bb, &[]);
+            ctx.builder.ins().jump(merge_bb, &[]);
         }
 
         // Else branch
-        builder.switch_to_block(else_bb);
-        builder.seal_block(else_bb);
+        ctx.builder.switch_to_block(else_bb);
+        ctx.builder.seal_block(else_bb);
         let else_terminated = if let Some(else_id) = else_block {
-            let t = self.compile_block(else_id, builder, fn_ctx);
+            let t = self.compile_block(else_id, ctx);
             if !t {
-                builder.ins().jump(merge_bb, &[]);
+                ctx.builder.ins().jump(merge_bb, &[]);
             }
             t
         } else {
-            builder.ins().jump(merge_bb, &[]);
+            ctx.builder.ins().jump(merge_bb, &[]);
             false
         };
 
         if then_terminated && else_terminated {
             // merge_bb is unreachable, but we still need to seal it
-            builder.seal_block(merge_bb);
+            ctx.builder.seal_block(merge_bb);
             true
         } else {
-            builder.switch_to_block(merge_bb);
-            builder.seal_block(merge_bb);
+            ctx.builder.switch_to_block(merge_bb);
+            ctx.builder.seal_block(merge_bb);
             false
         }
     }
 
-    fn compile_while_stmt(
-        &mut self,
-        cond: NodeId,
-        body: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
-    ) -> bool {
-        let header_bb = builder.create_block();
-        let body_bb = builder.create_block();
-        let exit_bb = builder.create_block();
+    fn compile_while_stmt(&mut self, cond: NodeId, body: NodeId, ctx: &mut BuildCtx) -> bool {
+        let header_bb = ctx.builder.create_block();
+        let body_bb = ctx.builder.create_block();
+        let exit_bb = ctx.builder.create_block();
 
-        builder.ins().jump(header_bb, &[]);
+        ctx.builder.ins().jump(header_bb, &[]);
 
-        builder.switch_to_block(header_bb);
+        ctx.builder.switch_to_block(header_bb);
         // Don't seal header yet — back-edge from body not yet added
 
-        let (cond_val, cond_ty) = self.compile_expr(cond, builder, fn_ctx);
-        let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, builder);
-        builder.ins().brif(cond_i8, body_bb, &[], exit_bb, &[]);
+        let (cond_val, cond_ty) = self.compile_expr(cond, ctx);
+        let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, ctx);
+        ctx.builder.ins().brif(cond_i8, body_bb, &[], exit_bb, &[]);
 
-        builder.switch_to_block(body_bb);
-        builder.seal_block(body_bb);
-        let body_terminated = self.compile_block(body, builder, fn_ctx);
+        ctx.builder.switch_to_block(body_bb);
+        ctx.builder.seal_block(body_bb);
+        let body_terminated = self.compile_block(body, ctx);
         if !body_terminated {
-            builder.ins().jump(header_bb, &[]);
+            ctx.builder.ins().jump(header_bb, &[]);
         }
 
         // Now seal header (predecessors: entry jump + back-edge)
-        builder.seal_block(header_bb);
+        ctx.builder.seal_block(header_bb);
 
-        builder.switch_to_block(exit_bb);
-        builder.seal_block(exit_bb);
+        ctx.builder.switch_to_block(exit_bb);
+        ctx.builder.seal_block(exit_bb);
         false
     }
 
@@ -546,22 +519,21 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         &mut self,
         callee: NodeId,
         args: &[NodeId],
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
+        ctx: &mut BuildCtx,
     ) -> Option<(Value, ValType)> {
         let fn_name = match self.world.kind(callee) {
             NodeKind::Ident(name) => *name,
             _ => panic!("callee must be an identifier"),
         };
 
-        if let Some(&fref) = fn_ctx.func_refs.get(fn_name) {
+        if let Some(&fref) = ctx.func_refs.get(fn_name) {
             let mut arg_vals = Vec::new();
             for &arg_id in args {
-                let (val, _val_ty) = self.compile_expr(arg_id, builder, fn_ctx);
+                let (val, _val_ty) = self.compile_expr(arg_id, ctx);
                 arg_vals.push(val);
             }
-            let call = builder.ins().call(fref, &arg_vals);
-            let results = builder.inst_results(call);
+            let call = ctx.builder.ins().call(fref, &arg_vals);
+            let results = ctx.builder.inst_results(call);
             if results.is_empty() {
                 None
             } else {
@@ -583,8 +555,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         &mut self,
         builtin: Builtin,
         args: &[NodeId],
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
+        ctx: &mut BuildCtx,
     ) -> Option<(Value, ValType)> {
         match builtin {
             Builtin::Print => {
@@ -593,62 +564,62 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     NodeKind::StringLit(s) => {
                         let s = s.to_string();
                         let (data_id, len) = self.get_or_create_string_data(&s);
-                        let gv = self.module.declare_data_in_func(data_id, builder.func);
-                        let ptr = builder
+                        let gv = self.module.declare_data_in_func(data_id, ctx.builder.func);
+                        let ptr = ctx
+                            .builder
                             .ins()
                             .symbol_value(self.module.target_config().pointer_type(), gv);
-                        let len_val = builder.ins().iconst(types::I64, len as i64);
-                        builder
+                        let len_val = ctx.builder.ins().iconst(types::I64, len as i64);
+                        ctx.builder
                             .ins()
-                            .call(fn_ctx.runtime[&RuntimeFn::PrintStr], &[ptr, len_val]);
+                            .call(ctx.runtime[&RuntimeFn::PrintStr], &[ptr, len_val]);
                     }
                     NodeKind::BuiltinCall {
                         builtin: Builtin::Arg,
                         args: inner_args,
                     } => {
                         assert!(inner_args.len() == 1, "arg() takes exactly 1 argument");
-                        let (idx_val, idx_ty) = self.compile_expr(inner_args[0], builder, fn_ctx);
-                        let idx_i64 = self.coerce(idx_val, idx_ty, ValType::I64, builder);
+                        let (idx_val, idx_ty) = self.compile_expr(inner_args[0], ctx);
+                        let idx_i64 = self.coerce(idx_val, idx_ty, ValType::I64, ctx);
 
                         let ptr_type = self.module.target_config().pointer_type();
                         let ptr_size = ptr_type.bytes();
 
                         // Allocate stack slots for out_ptr and out_len
-                        let ptr_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        let ptr_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             ptr_size,
                             0,
                         ));
-                        let len_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        let len_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             8, // i64 = 8 bytes
                             0,
                         ));
 
-                        let ptr_addr = builder.ins().stack_addr(ptr_type, ptr_slot, 0);
-                        let len_addr = builder.ins().stack_addr(ptr_type, len_slot, 0);
-                        builder.ins().call(
-                            fn_ctx.runtime[&RuntimeFn::Arg],
-                            &[idx_i64, ptr_addr, len_addr],
-                        );
-
-                        let str_ptr = builder.ins().stack_load(ptr_type, ptr_slot, 0);
-                        let str_len = builder.ins().stack_load(types::I64, len_slot, 0);
-                        builder
+                        let ptr_addr = ctx.builder.ins().stack_addr(ptr_type, ptr_slot, 0);
+                        let len_addr = ctx.builder.ins().stack_addr(ptr_type, len_slot, 0);
+                        ctx.builder
                             .ins()
-                            .call(fn_ctx.runtime[&RuntimeFn::PrintStr], &[str_ptr, str_len]);
+                            .call(ctx.runtime[&RuntimeFn::Arg], &[idx_i64, ptr_addr, len_addr]);
+
+                        let str_ptr = ctx.builder.ins().stack_load(ptr_type, ptr_slot, 0);
+                        let str_len = ctx.builder.ins().stack_load(types::I64, len_slot, 0);
+                        ctx.builder
+                            .ins()
+                            .call(ctx.runtime[&RuntimeFn::PrintStr], &[str_ptr, str_len]);
                     }
                     _ => {
-                        let (val, val_ty) = self.compile_expr(args[0], builder, fn_ctx);
+                        let (val, val_ty) = self.compile_expr(args[0], ctx);
                         if val_ty == ValType::Float {
-                            builder
+                            ctx.builder
                                 .ins()
-                                .call(fn_ctx.runtime[&RuntimeFn::PrintFloat], &[val]);
+                                .call(ctx.runtime[&RuntimeFn::PrintFloat], &[val]);
                         } else {
-                            let int_val = self.coerce(val, val_ty, ValType::I64, builder);
-                            builder
+                            let int_val = self.coerce(val, val_ty, ValType::I64, ctx);
+                            ctx.builder
                                 .ins()
-                                .call(fn_ctx.runtime[&RuntimeFn::PrintInt], &[int_val]);
+                                .call(ctx.runtime[&RuntimeFn::PrintInt], &[int_val]);
                         }
                     }
                 }
@@ -656,8 +627,8 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             }
             Builtin::Argc => {
                 assert!(args.is_empty(), "argc() takes no arguments");
-                let call = builder.ins().call(fn_ctx.runtime[&RuntimeFn::Argc], &[]);
-                let result = builder.inst_results(call)[0];
+                let call = ctx.builder.ins().call(ctx.runtime[&RuntimeFn::Argc], &[]);
+                let result = ctx.builder.inst_results(call)[0];
                 Some((result, ValType::I64))
             }
             Builtin::Arg => {
@@ -668,54 +639,42 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
     }
 
-    fn compile_expr(
-        &mut self,
-        id: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
-    ) -> (Value, ValType) {
+    fn compile_expr(&mut self, id: NodeId, ctx: &mut BuildCtx) -> (Value, ValType) {
         match *self.world.kind(id) {
-            NodeKind::IntLit(n) => self.compile_int_lit(n, builder),
-            NodeKind::FloatLit(f) => self.compile_float_lit(f, builder),
-            NodeKind::BoolLit(b) => self.compile_bool_lit(b, builder),
-            NodeKind::Ident(name) => self.compile_ident(name, fn_ctx, builder),
-            NodeKind::BinOp { op, lhs, rhs } => self.compile_bin_op(op, lhs, rhs, builder, fn_ctx),
-            NodeKind::UnaryOp { op, operand } => {
-                self.compile_unary_op(op, operand, builder, fn_ctx)
-            }
+            NodeKind::IntLit(n) => self.compile_int_lit(n, ctx),
+            NodeKind::FloatLit(f) => self.compile_float_lit(f, ctx),
+            NodeKind::BoolLit(b) => self.compile_bool_lit(b, ctx),
+            NodeKind::Ident(name) => self.compile_ident(name, ctx),
+            NodeKind::BinOp { op, lhs, rhs } => self.compile_bin_op(op, lhs, rhs, ctx),
+            NodeKind::UnaryOp { op, operand } => self.compile_unary_op(op, operand, ctx),
             NodeKind::Call { callee, args } => self
-                .compile_call(callee, args, builder, fn_ctx)
+                .compile_call(callee, args, ctx)
                 .expect("call in expression position must return a value"),
             NodeKind::BuiltinCall { builtin, args } => self
-                .compile_builtin_call(builtin, args, builder, fn_ctx)
+                .compile_builtin_call(builtin, args, ctx)
                 .expect("builtin call in expression position must return a value"),
             _ => panic!("unsupported expression: {:?}", self.world.kind(id)),
         }
     }
 
-    fn compile_int_lit(&self, n: i64, builder: &mut FunctionBuilder) -> (Value, ValType) {
-        let val = builder.ins().iconst(types::I64, n);
+    fn compile_int_lit(&self, n: i64, ctx: &mut BuildCtx) -> (Value, ValType) {
+        let val = ctx.builder.ins().iconst(types::I64, n);
         (val, ValType::I64)
     }
 
-    fn compile_float_lit(&self, f: f64, builder: &mut FunctionBuilder) -> (Value, ValType) {
-        let val = builder.ins().f64const(f);
+    fn compile_float_lit(&self, f: f64, ctx: &mut BuildCtx) -> (Value, ValType) {
+        let val = ctx.builder.ins().f64const(f);
         (val, ValType::Float)
     }
 
-    fn compile_bool_lit(&self, b: bool, builder: &mut FunctionBuilder) -> (Value, ValType) {
-        let val = builder.ins().iconst(types::I8, b as i64);
+    fn compile_bool_lit(&self, b: bool, ctx: &mut BuildCtx) -> (Value, ValType) {
+        let val = ctx.builder.ins().iconst(types::I8, b as i64);
         (val, ValType::Bool)
     }
 
-    fn compile_ident(
-        &self,
-        name: &str,
-        fn_ctx: &mut FnCtx,
-        builder: &mut FunctionBuilder,
-    ) -> (Value, ValType) {
-        let (var, vt) = fn_ctx.vars[name];
-        let val = builder.use_var(var);
+    fn compile_ident(&self, name: &str, ctx: &mut BuildCtx) -> (Value, ValType) {
+        let (var, vt) = ctx.vars[name];
+        let val = ctx.builder.use_var(var);
         (val, vt)
     }
 
@@ -724,40 +683,40 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         op: BinOp,
         lhs: NodeId,
         rhs: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
+        ctx: &mut BuildCtx,
     ) -> (Value, ValType) {
-        let (l, l_ty) = self.compile_expr(lhs, builder, fn_ctx);
-        let (r, r_ty) = self.compile_expr(rhs, builder, fn_ctx);
+        let (l, l_ty) = self.compile_expr(lhs, ctx);
+        let (r, r_ty) = self.compile_expr(rhs, ctx);
 
         let is_float = l_ty == ValType::Float || r_ty == ValType::Float;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if is_float {
                     if op == BinOp::Mod {
-                        let call = builder
+                        let call = ctx
+                            .builder
                             .ins()
-                            .call(fn_ctx.runtime[&RuntimeFn::FMod], &[l, r]);
-                        let result = builder.inst_results(call)[0];
+                            .call(ctx.runtime[&RuntimeFn::FMod], &[l, r]);
+                        let result = ctx.builder.inst_results(call)[0];
                         return (result, ValType::Float);
                     }
                     let result = match op {
-                        BinOp::Add => builder.ins().fadd(l, r),
-                        BinOp::Sub => builder.ins().fsub(l, r),
-                        BinOp::Mul => builder.ins().fmul(l, r),
-                        BinOp::Div => builder.ins().fdiv(l, r),
+                        BinOp::Add => ctx.builder.ins().fadd(l, r),
+                        BinOp::Sub => ctx.builder.ins().fsub(l, r),
+                        BinOp::Mul => ctx.builder.ins().fmul(l, r),
+                        BinOp::Div => ctx.builder.ins().fdiv(l, r),
                         _ => unreachable!(),
                     };
                     (result, ValType::Float)
                 } else {
-                    let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                    let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                    let l64 = self.coerce(l, l_ty, ValType::I64, ctx);
+                    let r64 = self.coerce(r, r_ty, ValType::I64, ctx);
                     let result = match op {
-                        BinOp::Add => builder.ins().iadd(l64, r64),
-                        BinOp::Sub => builder.ins().isub(l64, r64),
-                        BinOp::Mul => builder.ins().imul(l64, r64),
-                        BinOp::Div => builder.ins().sdiv(l64, r64),
-                        BinOp::Mod => builder.ins().srem(l64, r64),
+                        BinOp::Add => ctx.builder.ins().iadd(l64, r64),
+                        BinOp::Sub => ctx.builder.ins().isub(l64, r64),
+                        BinOp::Mul => ctx.builder.ins().imul(l64, r64),
+                        BinOp::Div => ctx.builder.ins().sdiv(l64, r64),
+                        BinOp::Mod => ctx.builder.ins().srem(l64, r64),
                         _ => unreachable!(),
                     };
                     (result, ValType::I64)
@@ -765,18 +724,20 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             }
             BinOp::Pow => {
                 if is_float {
-                    let call = builder
+                    let call = ctx
+                        .builder
                         .ins()
-                        .call(fn_ctx.runtime[&RuntimeFn::FPow], &[l, r]);
-                    let result = builder.inst_results(call)[0];
+                        .call(ctx.runtime[&RuntimeFn::FPow], &[l, r]);
+                    let result = ctx.builder.inst_results(call)[0];
                     (result, ValType::Float)
                 } else {
-                    let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                    let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                    let call = builder
+                    let l64 = self.coerce(l, l_ty, ValType::I64, ctx);
+                    let r64 = self.coerce(r, r_ty, ValType::I64, ctx);
+                    let call = ctx
+                        .builder
                         .ins()
-                        .call(fn_ctx.runtime[&RuntimeFn::IPow], &[l64, r64]);
-                    let result = builder.inst_results(call)[0];
+                        .call(ctx.runtime[&RuntimeFn::IPow], &[l64, r64]);
+                    let result = ctx.builder.inst_results(call)[0];
                     (result, ValType::I64)
                 }
             }
@@ -791,11 +752,11 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         BinOp::Ge => FloatCC::GreaterThanOrEqual,
                         _ => unreachable!(),
                     };
-                    let result = builder.ins().fcmp(cc, l, r);
+                    let result = ctx.builder.ins().fcmp(cc, l, r);
                     (result, ValType::Bool)
                 } else {
-                    let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                    let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                    let l64 = self.coerce(l, l_ty, ValType::I64, ctx);
+                    let r64 = self.coerce(r, r_ty, ValType::I64, ctx);
                     let cc = match op {
                         BinOp::Eq => IntCC::Equal,
                         BinOp::Ne => IntCC::NotEqual,
@@ -805,29 +766,29 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
                         _ => unreachable!(),
                     };
-                    let result = builder.ins().icmp(cc, l64, r64);
+                    let result = ctx.builder.ins().icmp(cc, l64, r64);
                     (result, ValType::Bool)
                 }
             }
             BinOp::And | BinOp::Or => {
-                let lb = self.coerce(l, l_ty, ValType::Bool, builder);
-                let rb = self.coerce(r, r_ty, ValType::Bool, builder);
+                let lb = self.coerce(l, l_ty, ValType::Bool, ctx);
+                let rb = self.coerce(r, r_ty, ValType::Bool, ctx);
                 let result = match op {
-                    BinOp::And => builder.ins().band(lb, rb),
-                    BinOp::Or => builder.ins().bor(lb, rb),
+                    BinOp::And => ctx.builder.ins().band(lb, rb),
+                    BinOp::Or => ctx.builder.ins().bor(lb, rb),
                     _ => unreachable!(),
                 };
                 (result, ValType::Bool)
             }
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
-                let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                let l64 = self.coerce(l, l_ty, ValType::I64, ctx);
+                let r64 = self.coerce(r, r_ty, ValType::I64, ctx);
                 let result = match op {
-                    BinOp::BitAnd => builder.ins().band(l64, r64),
-                    BinOp::BitOr => builder.ins().bor(l64, r64),
-                    BinOp::BitXor => builder.ins().bxor(l64, r64),
-                    BinOp::Shl => builder.ins().ishl(l64, r64),
-                    BinOp::Shr => builder.ins().sshr(l64, r64),
+                    BinOp::BitAnd => ctx.builder.ins().band(l64, r64),
+                    BinOp::BitOr => ctx.builder.ins().bor(l64, r64),
+                    BinOp::BitXor => ctx.builder.ins().bxor(l64, r64),
+                    BinOp::Shl => ctx.builder.ins().ishl(l64, r64),
+                    BinOp::Shr => ctx.builder.ins().sshr(l64, r64),
                     _ => unreachable!(),
                 };
                 (result, ValType::I64)
@@ -839,48 +800,41 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         &mut self,
         op: crate::ast::UnaryOp,
         operand: NodeId,
-        builder: &mut FunctionBuilder,
-        fn_ctx: &mut FnCtx,
+        ctx: &mut BuildCtx,
     ) -> (Value, ValType) {
-        let (val, vt) = self.compile_expr(operand, builder, fn_ctx);
+        let (val, vt) = self.compile_expr(operand, ctx);
         match op {
             crate::ast::UnaryOp::Neg => {
                 if vt == ValType::Float {
-                    let result = builder.ins().fneg(val);
+                    let result = ctx.builder.ins().fneg(val);
                     (result, ValType::Float)
                 } else {
-                    let v64 = self.coerce(val, vt, ValType::I64, builder);
-                    let result = builder.ins().ineg(v64);
+                    let v64 = self.coerce(val, vt, ValType::I64, ctx);
+                    let result = ctx.builder.ins().ineg(v64);
                     (result, ValType::I64)
                 }
             }
             crate::ast::UnaryOp::Not => {
-                let vb = self.coerce(val, vt, ValType::Bool, builder);
-                let one = builder.ins().iconst(types::I8, 1);
-                let result = builder.ins().bxor(vb, one);
+                let vb = self.coerce(val, vt, ValType::Bool, ctx);
+                let one = ctx.builder.ins().iconst(types::I8, 1);
+                let result = ctx.builder.ins().bxor(vb, one);
                 (result, ValType::Bool)
             }
             crate::ast::UnaryOp::BitNot => {
-                let v64 = self.coerce(val, vt, ValType::I64, builder);
-                let result = builder.ins().bnot(v64);
+                let v64 = self.coerce(val, vt, ValType::I64, ctx);
+                let result = ctx.builder.ins().bnot(v64);
                 (result, ValType::I64)
             }
         }
     }
 
-    fn coerce(
-        &self,
-        val: Value,
-        from: ValType,
-        to: ValType,
-        builder: &mut FunctionBuilder,
-    ) -> Value {
+    fn coerce(&self, val: Value, from: ValType, to: ValType, ctx: &mut BuildCtx) -> Value {
         if from == to {
             return val;
         }
         match (from, to) {
-            (ValType::Bool, ValType::I64) => builder.ins().uextend(types::I64, val),
-            (ValType::I64, ValType::Bool) => builder.ins().ireduce(types::I8, val),
+            (ValType::Bool, ValType::I64) => ctx.builder.ins().uextend(types::I64, val),
+            (ValType::I64, ValType::Bool) => ctx.builder.ins().ireduce(types::I8, val),
             _ => val,
         }
     }
