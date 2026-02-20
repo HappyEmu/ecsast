@@ -27,29 +27,29 @@ pub fn declare_runtime(module: &mut ObjectModule) -> Result<FunctionRuntime, Box
     let ptr = module.target_config().pointer_type();
     let mut ids = HashMap::new();
 
-    // print_int(i64) -> void
+    // ecsast_print_int(i64) -> void
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     ids.insert(
         RuntimeFn::PrintInt,
-        module.declare_function("print_int", Linkage::Import, &sig)?,
+        module.declare_function("ecsast_print_int", Linkage::Import, &sig)?,
     );
 
-    // print_float(f64) -> void
+    // ecsast_print_float(f64) -> void
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::F64));
     ids.insert(
         RuntimeFn::PrintFloat,
-        module.declare_function("print_float", Linkage::Import, &sig)?,
+        module.declare_function("ecsast_print_float", Linkage::Import, &sig)?,
     );
 
-    // print_str(ptr, i64) -> void
+    // ecsast_print_str(ptr, i64) -> void
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr));
     sig.params.push(AbiParam::new(types::I64));
     ids.insert(
         RuntimeFn::PrintStr,
-        module.declare_function("print_str", Linkage::Import, &sig)?,
+        module.declare_function("ecsast_print_str", Linkage::Import, &sig)?,
     );
 
     // ecsast_init_args(i32, ptr) -> void

@@ -95,3 +95,8 @@ fn bitwise() {
 fn stress() {
     run_interpreter_test("stress");
 }
+
+#[test]
+fn strings() {
+    run_interpreter_test("strings");
+}

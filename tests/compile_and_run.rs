@@ -127,3 +127,13 @@ fn stress() {
 fn stress_big_blocks() {
     run_program_test("stress_big_blocks");
 }
+
+#[test]
+fn strings() {
+    run_program_test("strings");
+}
+
+#[test]
+fn string_args() {
+    run_program_test_with_args("string_args", &["hello", "world"]);
+}

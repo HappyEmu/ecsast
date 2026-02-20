@@ -1,0 +1,15 @@
+fn print_str(s: str) {
+    print("Printing string:");
+    print(s);
+}
+
+fn main() {
+    let s: str = "Hello, world!";
+    print(s);
+    let t: str = "Goodbye!";
+    print(t);
+    t = "Reassigned";
+    print(t);
+    print("direct literal");
+    print_str("Using print_str function");
+}

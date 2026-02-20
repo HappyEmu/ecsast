@@ -85,8 +85,10 @@ The `Compiler` struct in `codegen.rs` holds the `ObjectModule`, declared functio
 2. **Definition pass**: for each `FnDecl`, generate IR via `FunctionBuilder` and `module.define_function()`. For inline functions, the compiled `Function` IR is saved in `inline_bodies`. Before defining any function, `ctx.inline()` is called with the `Inliner` to inline marked callees.
 
 Key internal types:
-- **`FnCtx`** — per-function context holding `Variable` map, function refs, and return type
-- **`ValType`** — `{ I64, Bool }` enum for type tracking; `compile_expr` returns `(Value, ValType)` and `coerce()` inserts `uextend`/`ireduce` as needed
+- **`BuildCtx`** — per-function context holding `Variable` map, function refs, and return type
+- **`ValType`** — `{ I64, Float, Bool, Str }` enum for type tracking
+- **`ExprResult`** — `Scalar(Value, ValType)` or `Str { ptr, len }` for compile_expr results; strings are represented as (pointer, length) pairs throughout the codegen
+- **`VarStorage`** — `Scalar(Variable, ValType)` or `Str { ptr_var, len_var }` for variable storage; string variables use two Cranelift variables
 - **`Inliner`** — implements Cranelift's `Inline` trait; resolves `FuncRef` → `FuncId` via `UserExternalName` and returns `InlineCommand::Inline` with the saved function body for inline-marked callees
 
 Control flow patterns:
@@ -94,7 +96,7 @@ Control flow patterns:
 - **while**: header block (sealed after back-edge) → body → back-edge jump; exit block
 - **return**: emits `return_` instruction and marks block as terminated
 
-C runtime (`RUNTIME_C`): compiled and linked automatically; provides `print_int(long)`, `print_str(const char*, long)`, `ecsast_init_args(int, char**)`, `ecsast_argc()`, and `ecsast_arg(long, const char**, long*)`.
+C runtime (`RUNTIME_C`): compiled and linked automatically; provides `ecsast_print_int(long)`, `ecsast_print_float(double)`, `ecsast_print_str(const char*, long)`, `ecsast_init_args(int, char**)`, `ecsast_argc()`, and `ecsast_arg(long, const char**, long*)`. All runtime functions use the `ecsast_` prefix to avoid collisions with user-defined function names.
 
 ### Cranelift API Notes (v0.128)
 
@@ -133,7 +135,7 @@ Supported constructs:
 - **Statements**: `let x: T = expr;`, `x = expr;`, `return expr;`, `if`/`else`, `while`
 - **Functions**: `fn name(params) -> ReturnType { body }` (return type optional)
 - **Inline functions**: `inline fn name(params) -> ReturnType { body }` — inlined at call sites by Cranelift
-- **Built-ins**: `print()` (int, bool, str), `argc()`, `arg(i)` (command-line arguments)
+- **Built-ins**: `print()` (int, float, bool, str), `argc()`, `arg(i)` → `str` (command-line arguments)
 - **Entry point**: program must define a `fn main()` with no parameters
 
 ### Tests
