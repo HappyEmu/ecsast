@@ -70,18 +70,26 @@ enum ValType {
     Bool,
 }
 
+/// Identifies a C runtime function imported by the compiler.
+/// Adding a new runtime function only requires a new variant here and one
+/// entry in `Compiler::declare_runtime()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RuntimeFn {
+    PrintInt,
+    PrintFloat,
+    PrintStr,
+    InitArgs,
+    Argc,
+    Arg,
+    IPow,
+    FPow,
+    FMod,
+}
+
 struct Compiler<'a, 'arena> {
     world: &'a AstWorld<'arena>,
     module: ObjectModule,
-    print_int_id: FuncId,
-    print_float_id: FuncId,
-    print_str_id: FuncId,
-    init_args_id: FuncId,
-    argc_id: FuncId,
-    arg_id: FuncId,
-    ipow_id: FuncId,
-    fpow_id: FuncId,
-    fmod_id: FuncId,
+    runtime_ids: HashMap<RuntimeFn, FuncId>,
     user_funcs: HashMap<String, FuncId>,
     user_func_return_types: HashMap<String, Option<ValType>>,
     string_data: HashMap<String, (DataId, usize)>,
@@ -91,15 +99,7 @@ struct Compiler<'a, 'arena> {
 
 struct FnCtx {
     vars: HashMap<String, (Variable, ValType)>,
-    print_int_ref: FuncRef,
-    print_float_ref: FuncRef,
-    print_str_ref: FuncRef,
-    init_args_ref: FuncRef,
-    argc_ref: FuncRef,
-    arg_ref: FuncRef,
-    ipow_ref: FuncRef,
-    fpow_ref: FuncRef,
-    fmod_ref: FuncRef,
+    runtime: HashMap<RuntimeFn, FuncRef>,
     func_refs: HashMap<String, FuncRef>,
     return_type: Option<ValType>,
 }
@@ -118,89 +118,82 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             cranelift_module::default_libcall_names(),
         )?;
         let mut module = ObjectModule::new(obj_builder);
-
-        // Declare print_int(i64) -> void
-        let mut print_int_sig = module.make_signature();
-        print_int_sig.params.push(AbiParam::new(types::I64));
-        let print_int_id =
-            module.declare_function("print_int", Linkage::Import, &print_int_sig)?;
-
-        // Declare print_float(f64) -> void
-        let mut print_float_sig = module.make_signature();
-        print_float_sig.params.push(AbiParam::new(types::F64));
-        let print_float_id =
-            module.declare_function("print_float", Linkage::Import, &print_float_sig)?;
-
-        // Declare print_str(ptr, i64) -> void
-        let mut print_str_sig = module.make_signature();
-        print_str_sig
-            .params
-            .push(AbiParam::new(module.target_config().pointer_type()));
-        print_str_sig.params.push(AbiParam::new(types::I64));
-        let print_str_id =
-            module.declare_function("print_str", Linkage::Import, &print_str_sig)?;
-
-        // Declare ecsast_init_args(i32, ptr) -> void
-        let mut init_args_sig = module.make_signature();
-        init_args_sig.params.push(AbiParam::new(types::I32));
-        init_args_sig
-            .params
-            .push(AbiParam::new(module.target_config().pointer_type()));
-        let init_args_id =
-            module.declare_function("ecsast_init_args", Linkage::Import, &init_args_sig)?;
-
-        // Declare ecsast_argc() -> i64
-        let mut argc_sig = module.make_signature();
-        argc_sig.returns.push(AbiParam::new(types::I64));
-        let argc_id = module.declare_function("ecsast_argc", Linkage::Import, &argc_sig)?;
-
-        // Declare ecsast_arg(i64, ptr, ptr) -> void
-        let ptr_type = module.target_config().pointer_type();
-        let mut arg_sig = module.make_signature();
-        arg_sig.params.push(AbiParam::new(types::I64));
-        arg_sig.params.push(AbiParam::new(ptr_type));
-        arg_sig.params.push(AbiParam::new(ptr_type));
-        let arg_id = module.declare_function("ecsast_arg", Linkage::Import, &arg_sig)?;
-
-        // Declare ecsast_ipow(i64, i64) -> i64
-        let mut ipow_sig = module.make_signature();
-        ipow_sig.params.push(AbiParam::new(types::I64));
-        ipow_sig.params.push(AbiParam::new(types::I64));
-        ipow_sig.returns.push(AbiParam::new(types::I64));
-        let ipow_id = module.declare_function("ecsast_ipow", Linkage::Import, &ipow_sig)?;
-
-        // Declare ecsast_fpow(f64, f64) -> f64
-        let mut fpow_sig = module.make_signature();
-        fpow_sig.params.push(AbiParam::new(types::F64));
-        fpow_sig.params.push(AbiParam::new(types::F64));
-        fpow_sig.returns.push(AbiParam::new(types::F64));
-        let fpow_id = module.declare_function("ecsast_fpow", Linkage::Import, &fpow_sig)?;
-
-        // Declare ecsast_fmod(f64, f64) -> f64
-        let mut fmod_sig = module.make_signature();
-        fmod_sig.params.push(AbiParam::new(types::F64));
-        fmod_sig.params.push(AbiParam::new(types::F64));
-        fmod_sig.returns.push(AbiParam::new(types::F64));
-        let fmod_id = module.declare_function("ecsast_fmod", Linkage::Import, &fmod_sig)?;
+        let runtime_ids = Self::declare_runtime(&mut module)?;
 
         Ok(Self {
             world,
             module,
-            print_int_id,
-            print_float_id,
-            print_str_id,
-            init_args_id,
-            argc_id,
-            arg_id,
-            ipow_id,
-            fpow_id,
-            fmod_id,
+            runtime_ids,
             user_funcs: HashMap::new(),
             user_func_return_types: HashMap::new(),
             string_data: HashMap::new(),
             inline_funcs: HashSet::new(),
             inline_bodies: HashMap::new(),
         })
+    }
+
+    /// Declare all C runtime functions and return a map from `RuntimeFn` to `FuncId`.
+    /// To add a new runtime function: add a variant to `RuntimeFn` and one arm here.
+    fn declare_runtime(module: &mut ObjectModule) -> Result<HashMap<RuntimeFn, FuncId>, Box<dyn Error>> {
+        let ptr = module.target_config().pointer_type();
+        let mut ids = HashMap::new();
+
+        // print_int(i64) -> void
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ids.insert(RuntimeFn::PrintInt, module.declare_function("print_int", Linkage::Import, &sig)?);
+
+        // print_float(f64) -> void
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        ids.insert(RuntimeFn::PrintFloat, module.declare_function("print_float", Linkage::Import, &sig)?);
+
+        // print_str(ptr, i64) -> void
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(ptr));
+        sig.params.push(AbiParam::new(types::I64));
+        ids.insert(RuntimeFn::PrintStr, module.declare_function("print_str", Linkage::Import, &sig)?);
+
+        // ecsast_init_args(i32, ptr) -> void
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(ptr));
+        ids.insert(RuntimeFn::InitArgs, module.declare_function("ecsast_init_args", Linkage::Import, &sig)?);
+
+        // ecsast_argc() -> i64
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        ids.insert(RuntimeFn::Argc, module.declare_function("ecsast_argc", Linkage::Import, &sig)?);
+
+        // ecsast_arg(i64, ptr, ptr) -> void
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(ptr));
+        sig.params.push(AbiParam::new(ptr));
+        ids.insert(RuntimeFn::Arg, module.declare_function("ecsast_arg", Linkage::Import, &sig)?);
+
+        // ecsast_ipow(i64, i64) -> i64
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        ids.insert(RuntimeFn::IPow, module.declare_function("ecsast_ipow", Linkage::Import, &sig)?);
+
+        // ecsast_fpow(f64, f64) -> f64
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        ids.insert(RuntimeFn::FPow, module.declare_function("ecsast_fpow", Linkage::Import, &sig)?);
+
+        // ecsast_fmod(f64, f64) -> f64
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        ids.insert(RuntimeFn::FMod, module.declare_function("ecsast_fmod", Linkage::Import, &sig)?);
+
+        Ok(ids)
     }
 
     fn resolve_type_name(&self, ty_id: NodeId) -> ValType {
@@ -365,7 +358,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             let argv_param = builder.block_params(entry)[1];
             builder
                 .ins()
-                .call(fn_ctx.init_args_ref, &[argc_param, argv_param]);
+                .call(fn_ctx.runtime[&RuntimeFn::InitArgs], &[argc_param, argv_param]);
 
             let terminated = self.compile_block(body, &mut builder, &mut fn_ctx);
 
@@ -456,33 +449,11 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         _items: &[NodeId],
         return_type: Option<ValType>,
     ) -> FnCtx {
-        let print_int_ref = self
-            .module
-            .declare_func_in_func(self.print_int_id, builder.func);
-        let print_float_ref = self
-            .module
-            .declare_func_in_func(self.print_float_id, builder.func);
-        let print_str_ref = self
-            .module
-            .declare_func_in_func(self.print_str_id, builder.func);
-        let init_args_ref = self
-            .module
-            .declare_func_in_func(self.init_args_id, builder.func);
-        let argc_ref = self
-            .module
-            .declare_func_in_func(self.argc_id, builder.func);
-        let arg_ref = self
-            .module
-            .declare_func_in_func(self.arg_id, builder.func);
-        let ipow_ref = self
-            .module
-            .declare_func_in_func(self.ipow_id, builder.func);
-        let fpow_ref = self
-            .module
-            .declare_func_in_func(self.fpow_id, builder.func);
-        let fmod_ref = self
-            .module
-            .declare_func_in_func(self.fmod_id, builder.func);
+        let runtime = self
+            .runtime_ids
+            .iter()
+            .map(|(&rfn, &fid)| (rfn, self.module.declare_func_in_func(fid, builder.func)))
+            .collect();
 
         let mut func_refs = HashMap::new();
         for (name, &fid) in &self.user_funcs {
@@ -492,15 +463,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
         FnCtx {
             vars: HashMap::new(),
-            print_int_ref,
-            print_float_ref,
-            print_str_ref,
-            init_args_ref,
-            argc_ref,
-            arg_ref,
-            ipow_ref,
-            fpow_ref,
-            fmod_ref,
+            runtime,
             func_refs,
             return_type,
         }
@@ -713,7 +676,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                             gv,
                         );
                         let len_val = builder.ins().iconst(types::I64, len as i64);
-                        builder.ins().call(fn_ctx.print_str_ref, &[ptr, len_val]);
+                        builder.ins().call(fn_ctx.runtime[&RuntimeFn::PrintStr], &[ptr, len_val]);
                     }
                     NodeKind::BuiltinCall { builtin: Builtin::Arg, args: inner_args } => {
                         assert!(inner_args.len() == 1, "arg() takes exactly 1 argument");
@@ -737,19 +700,19 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
                         let ptr_addr = builder.ins().stack_addr(ptr_type, ptr_slot, 0);
                         let len_addr = builder.ins().stack_addr(ptr_type, len_slot, 0);
-                        builder.ins().call(fn_ctx.arg_ref, &[idx_i64, ptr_addr, len_addr]);
+                        builder.ins().call(fn_ctx.runtime[&RuntimeFn::Arg], &[idx_i64, ptr_addr, len_addr]);
 
                         let str_ptr = builder.ins().stack_load(ptr_type, ptr_slot, 0);
                         let str_len = builder.ins().stack_load(types::I64, len_slot, 0);
-                        builder.ins().call(fn_ctx.print_str_ref, &[str_ptr, str_len]);
+                        builder.ins().call(fn_ctx.runtime[&RuntimeFn::PrintStr], &[str_ptr, str_len]);
                     }
                     _ => {
                         let (val, val_ty) = self.compile_expr(args[0], builder, fn_ctx);
                         if val_ty == ValType::Float {
-                            builder.ins().call(fn_ctx.print_float_ref, &[val]);
+                            builder.ins().call(fn_ctx.runtime[&RuntimeFn::PrintFloat], &[val]);
                         } else {
                             let int_val = self.coerce(val, val_ty, ValType::I64, builder);
-                            builder.ins().call(fn_ctx.print_int_ref, &[int_val]);
+                            builder.ins().call(fn_ctx.runtime[&RuntimeFn::PrintInt], &[int_val]);
                         }
                     }
                 }
@@ -757,7 +720,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             }
             Builtin::Argc => {
                 assert!(args.is_empty(), "argc() takes no arguments");
-                let call = builder.ins().call(fn_ctx.argc_ref, &[]);
+                let call = builder.ins().call(fn_ctx.runtime[&RuntimeFn::Argc], &[]);
                 let result = builder.inst_results(call)[0];
                 Some((result, ValType::I64))
             }
@@ -800,7 +763,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                         if is_float {
                             if op == BinOp::Mod {
-                                let call = builder.ins().call(fn_ctx.fmod_ref, &[l, r]);
+                                let call = builder.ins().call(fn_ctx.runtime[&RuntimeFn::FMod], &[l, r]);
                                 let result = builder.inst_results(call)[0];
                                 return (result, ValType::Float);
                             }
@@ -828,13 +791,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     }
                     BinOp::Pow => {
                         if is_float {
-                            let call = builder.ins().call(fn_ctx.fpow_ref, &[l, r]);
+                            let call = builder.ins().call(fn_ctx.runtime[&RuntimeFn::FPow], &[l, r]);
                             let result = builder.inst_results(call)[0];
                             (result, ValType::Float)
                         } else {
                             let l64 = self.coerce(l, l_ty, ValType::I64, builder);
                             let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                            let call = builder.ins().call(fn_ctx.ipow_ref, &[l64, r64]);
+                            let call = builder.ins().call(fn_ctx.runtime[&RuntimeFn::IPow], &[l64, r64]);
                             let result = builder.inst_results(call)[0];
                             (result, ValType::I64)
                         }
