@@ -5,7 +5,7 @@ use std::fs;
 use std::process::Command;
 
 use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, Opcode, StackSlotData, StackSlotKind, UserFuncName};
-use cranelift_codegen::ir::{condcodes::IntCC, FuncRef, Inst, Value};
+use cranelift_codegen::ir::{condcodes::{FloatCC, IntCC}, FuncRef, Inst, Value};
 use cranelift_codegen::isa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
@@ -37,7 +37,9 @@ impl OptLevel {
 
 const RUNTIME_C: &str = r#"
 #include <stdio.h>
+#include <math.h>
 void print_int(long n) { printf("%ld\n", n); }
+void print_float(double n) { printf("%g\n", n); }
 void print_str(const char *s, long len) { fwrite(s, 1, len, stdout); fputc('\n', stdout); }
 static int g_argc;
 static char **g_argv;
@@ -57,11 +59,14 @@ long ecsast_ipow(long base, long exp) {
     }
     return result;
 }
+double ecsast_fpow(double base, double exp) { return pow(base, exp); }
+double ecsast_fmod(double a, double b) { return fmod(a, b); }
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ValType {
     I64,
+    Float,
     Bool,
 }
 
@@ -69,12 +74,16 @@ struct Compiler<'a, 'arena> {
     world: &'a AstWorld<'arena>,
     module: ObjectModule,
     print_int_id: FuncId,
+    print_float_id: FuncId,
     print_str_id: FuncId,
     init_args_id: FuncId,
     argc_id: FuncId,
     arg_id: FuncId,
     ipow_id: FuncId,
+    fpow_id: FuncId,
+    fmod_id: FuncId,
     user_funcs: HashMap<String, FuncId>,
+    user_func_return_types: HashMap<String, Option<ValType>>,
     string_data: HashMap<String, (DataId, usize)>,
     inline_funcs: HashSet<String>,
     inline_bodies: HashMap<FuncId, Function>,
@@ -83,11 +92,14 @@ struct Compiler<'a, 'arena> {
 struct FnCtx {
     vars: HashMap<String, (Variable, ValType)>,
     print_int_ref: FuncRef,
+    print_float_ref: FuncRef,
     print_str_ref: FuncRef,
     init_args_ref: FuncRef,
     argc_ref: FuncRef,
     arg_ref: FuncRef,
     ipow_ref: FuncRef,
+    fpow_ref: FuncRef,
+    fmod_ref: FuncRef,
     func_refs: HashMap<String, FuncRef>,
     return_type: Option<ValType>,
 }
@@ -112,6 +124,12 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         print_int_sig.params.push(AbiParam::new(types::I64));
         let print_int_id =
             module.declare_function("print_int", Linkage::Import, &print_int_sig)?;
+
+        // Declare print_float(f64) -> void
+        let mut print_float_sig = module.make_signature();
+        print_float_sig.params.push(AbiParam::new(types::F64));
+        let print_float_id =
+            module.declare_function("print_float", Linkage::Import, &print_float_sig)?;
 
         // Declare print_str(ptr, i64) -> void
         let mut print_str_sig = module.make_signature();
@@ -151,16 +169,34 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         ipow_sig.returns.push(AbiParam::new(types::I64));
         let ipow_id = module.declare_function("ecsast_ipow", Linkage::Import, &ipow_sig)?;
 
+        // Declare ecsast_fpow(f64, f64) -> f64
+        let mut fpow_sig = module.make_signature();
+        fpow_sig.params.push(AbiParam::new(types::F64));
+        fpow_sig.params.push(AbiParam::new(types::F64));
+        fpow_sig.returns.push(AbiParam::new(types::F64));
+        let fpow_id = module.declare_function("ecsast_fpow", Linkage::Import, &fpow_sig)?;
+
+        // Declare ecsast_fmod(f64, f64) -> f64
+        let mut fmod_sig = module.make_signature();
+        fmod_sig.params.push(AbiParam::new(types::F64));
+        fmod_sig.params.push(AbiParam::new(types::F64));
+        fmod_sig.returns.push(AbiParam::new(types::F64));
+        let fmod_id = module.declare_function("ecsast_fmod", Linkage::Import, &fmod_sig)?;
+
         Ok(Self {
             world,
             module,
             print_int_id,
+            print_float_id,
             print_str_id,
             init_args_id,
             argc_id,
             arg_id,
             ipow_id,
+            fpow_id,
+            fmod_id,
             user_funcs: HashMap::new(),
+            user_func_return_types: HashMap::new(),
             string_data: HashMap::new(),
             inline_funcs: HashSet::new(),
             inline_bodies: HashMap::new(),
@@ -170,6 +206,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     fn resolve_type_name(&self, ty_id: NodeId) -> ValType {
         match self.world.kind(ty_id) {
             NodeKind::TypeName("int") => ValType::I64,
+            NodeKind::TypeName("float") => ValType::Float,
             NodeKind::TypeName("bool") => ValType::Bool,
             other => panic!("unsupported type: {other:?}"),
         }
@@ -178,6 +215,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     fn cranelift_type(&self, vt: ValType) -> types::Type {
         match vt {
             ValType::I64 => types::I64,
+            ValType::Float => types::F64,
             ValType::Bool => types::I8,
         }
     }
@@ -208,6 +246,8 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 }
                 let func_id = self.module.declare_function(name, Linkage::Local, &sig)?;
                 self.user_funcs.insert(name.to_string(), func_id);
+                let ret_vt = ret_ty.map(|id| self.resolve_type_name(id));
+                self.user_func_return_types.insert(name.to_string(), ret_vt);
                 if inline {
                     self.inline_funcs.insert(name.to_string());
                 }
@@ -284,7 +324,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
 
         let status = Command::new("cc")
-            .args([&obj_path, &rt_o_path, "-o", output_path])
+            .args([&obj_path, &rt_o_path, "-o", output_path, "-lm"])
             .status()?;
         if !status.success() {
             return Err("linking failed".into());
@@ -419,6 +459,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         let print_int_ref = self
             .module
             .declare_func_in_func(self.print_int_id, builder.func);
+        let print_float_ref = self
+            .module
+            .declare_func_in_func(self.print_float_id, builder.func);
         let print_str_ref = self
             .module
             .declare_func_in_func(self.print_str_id, builder.func);
@@ -434,6 +477,12 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         let ipow_ref = self
             .module
             .declare_func_in_func(self.ipow_id, builder.func);
+        let fpow_ref = self
+            .module
+            .declare_func_in_func(self.fpow_id, builder.func);
+        let fmod_ref = self
+            .module
+            .declare_func_in_func(self.fmod_id, builder.func);
 
         let mut func_refs = HashMap::new();
         for (name, &fid) in &self.user_funcs {
@@ -444,11 +493,14 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         FnCtx {
             vars: HashMap::new(),
             print_int_ref,
+            print_float_ref,
             print_str_ref,
             init_args_ref,
             argc_ref,
             arg_ref,
             ipow_ref,
+            fpow_ref,
+            fmod_ref,
             func_refs,
             return_type,
         }
@@ -628,8 +680,11 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             if results.is_empty() {
                 None
             } else {
-                // For now assume i64 for non-void returns
-                Some((results[0], ValType::I64))
+                let ret_vt = self.user_func_return_types
+                    .get(fn_name)
+                    .and_then(|opt| *opt)
+                    .unwrap_or(ValType::I64);
+                Some((results[0], ret_vt))
             }
         } else {
             panic!("undefined function: {fn_name}");
@@ -689,10 +744,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         builder.ins().call(fn_ctx.print_str_ref, &[str_ptr, str_len]);
                     }
                     _ => {
-                        // General expression argument: compile and print as integer
                         let (val, val_ty) = self.compile_expr(args[0], builder, fn_ctx);
-                        let int_val = self.coerce(val, val_ty, ValType::I64, builder);
-                        builder.ins().call(fn_ctx.print_int_ref, &[int_val]);
+                        if val_ty == ValType::Float {
+                            builder.ins().call(fn_ctx.print_float_ref, &[val]);
+                        } else {
+                            let int_val = self.coerce(val, val_ty, ValType::I64, builder);
+                            builder.ins().call(fn_ctx.print_int_ref, &[int_val]);
+                        }
                     }
                 }
                 None
@@ -720,6 +778,10 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 let val = builder.ins().iconst(types::I64, n);
                 (val, ValType::I64)
             }
+            NodeKind::FloatLit(f) => {
+                let val = builder.ins().f64const(f);
+                (val, ValType::Float)
+            }
             NodeKind::BoolLit(b) => {
                 let val = builder.ins().iconst(types::I8, b as i64);
                 (val, ValType::Bool)
@@ -733,41 +795,78 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 let (l, l_ty) = self.compile_expr(lhs, builder, fn_ctx);
                 let (r, r_ty) = self.compile_expr(rhs, builder, fn_ctx);
 
+                let is_float = l_ty == ValType::Float || r_ty == ValType::Float;
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                        let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                        let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                        let result = match op {
-                            BinOp::Add => builder.ins().iadd(l64, r64),
-                            BinOp::Sub => builder.ins().isub(l64, r64),
-                            BinOp::Mul => builder.ins().imul(l64, r64),
-                            BinOp::Div => builder.ins().sdiv(l64, r64),
-                            BinOp::Mod => builder.ins().srem(l64, r64),
-                            _ => unreachable!(),
-                        };
-                        (result, ValType::I64)
+                        if is_float {
+                            if op == BinOp::Mod {
+                                let call = builder.ins().call(fn_ctx.fmod_ref, &[l, r]);
+                                let result = builder.inst_results(call)[0];
+                                return (result, ValType::Float);
+                            }
+                            let result = match op {
+                                BinOp::Add => builder.ins().fadd(l, r),
+                                BinOp::Sub => builder.ins().fsub(l, r),
+                                BinOp::Mul => builder.ins().fmul(l, r),
+                                BinOp::Div => builder.ins().fdiv(l, r),
+                                _ => unreachable!(),
+                            };
+                            (result, ValType::Float)
+                        } else {
+                            let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                            let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                            let result = match op {
+                                BinOp::Add => builder.ins().iadd(l64, r64),
+                                BinOp::Sub => builder.ins().isub(l64, r64),
+                                BinOp::Mul => builder.ins().imul(l64, r64),
+                                BinOp::Div => builder.ins().sdiv(l64, r64),
+                                BinOp::Mod => builder.ins().srem(l64, r64),
+                                _ => unreachable!(),
+                            };
+                            (result, ValType::I64)
+                        }
                     }
                     BinOp::Pow => {
-                        let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                        let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                        let call = builder.ins().call(fn_ctx.ipow_ref, &[l64, r64]);
-                        let result = builder.inst_results(call)[0];
-                        (result, ValType::I64)
+                        if is_float {
+                            let call = builder.ins().call(fn_ctx.fpow_ref, &[l, r]);
+                            let result = builder.inst_results(call)[0];
+                            (result, ValType::Float)
+                        } else {
+                            let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                            let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                            let call = builder.ins().call(fn_ctx.ipow_ref, &[l64, r64]);
+                            let result = builder.inst_results(call)[0];
+                            (result, ValType::I64)
+                        }
                     }
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                        let l64 = self.coerce(l, l_ty, ValType::I64, builder);
-                        let r64 = self.coerce(r, r_ty, ValType::I64, builder);
-                        let cc = match op {
-                            BinOp::Eq => IntCC::Equal,
-                            BinOp::Ne => IntCC::NotEqual,
-                            BinOp::Lt => IntCC::SignedLessThan,
-                            BinOp::Le => IntCC::SignedLessThanOrEqual,
-                            BinOp::Gt => IntCC::SignedGreaterThan,
-                            BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
-                            _ => unreachable!(),
-                        };
-                        let result = builder.ins().icmp(cc, l64, r64);
-                        (result, ValType::Bool)
+                        if is_float {
+                            let cc = match op {
+                                BinOp::Eq => FloatCC::Equal,
+                                BinOp::Ne => FloatCC::NotEqual,
+                                BinOp::Lt => FloatCC::LessThan,
+                                BinOp::Le => FloatCC::LessThanOrEqual,
+                                BinOp::Gt => FloatCC::GreaterThan,
+                                BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                                _ => unreachable!(),
+                            };
+                            let result = builder.ins().fcmp(cc, l, r);
+                            (result, ValType::Bool)
+                        } else {
+                            let l64 = self.coerce(l, l_ty, ValType::I64, builder);
+                            let r64 = self.coerce(r, r_ty, ValType::I64, builder);
+                            let cc = match op {
+                                BinOp::Eq => IntCC::Equal,
+                                BinOp::Ne => IntCC::NotEqual,
+                                BinOp::Lt => IntCC::SignedLessThan,
+                                BinOp::Le => IntCC::SignedLessThanOrEqual,
+                                BinOp::Gt => IntCC::SignedGreaterThan,
+                                BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                                _ => unreachable!(),
+                            };
+                            let result = builder.ins().icmp(cc, l64, r64);
+                            (result, ValType::Bool)
+                        }
                     }
                     BinOp::And | BinOp::Or => {
                         let lb = self.coerce(l, l_ty, ValType::Bool, builder);
@@ -785,9 +884,14 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 let (val, vt) = self.compile_expr(operand, builder, fn_ctx);
                 match op {
                     crate::ast::UnaryOp::Neg => {
-                        let v64 = self.coerce(val, vt, ValType::I64, builder);
-                        let result = builder.ins().ineg(v64);
-                        (result, ValType::I64)
+                        if vt == ValType::Float {
+                            let result = builder.ins().fneg(val);
+                            (result, ValType::Float)
+                        } else {
+                            let v64 = self.coerce(val, vt, ValType::I64, builder);
+                            let result = builder.ins().ineg(v64);
+                            (result, ValType::I64)
+                        }
                     }
                     crate::ast::UnaryOp::Not => {
                         let vb = self.coerce(val, vt, ValType::Bool, builder);
