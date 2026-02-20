@@ -12,7 +12,7 @@ The compiler produces native binaries via Cranelift.
 Prerequisites
 -------------
 
-- Rust toolchain (rustup.rs) — edition 2024
+- Rust toolchain (rustup.rs) — edition 2024, rustc 1.90+
 - A C compiler (cc) on your PATH — used to link the output binary
 - macOS or Linux
 
@@ -35,6 +35,11 @@ Quick Start
 
     cargo run -- examples/fizzbuzz.ecs -o fizz
     ./fizz
+
+4. Enable optimizations with -O:
+
+    cargo run -- examples/add.ecs -o add -O speed
+    ./add
 
 
 Writing Programs
@@ -65,7 +70,35 @@ Supported features:
   - Assignment: x = x + 1;
   - Control flow: if/else, while, return
   - Functions: fn name(params) -> ReturnType { body }
-  - Built-in: print() works with int, bool, and str values
+  - Inline functions: inline fn name(params) -> ReturnType { body }
+  - Built-ins: print() works with int, bool, and str values
+  - Command-line args: argc() returns argument count, arg(i) for use in print()
+
+Inline Functions
+----------------
+
+Mark a function with the `inline` keyword to have Cranelift inline it at
+every call site. This eliminates call overhead for small helper functions:
+
+    inline fn add(a: int, b: int) -> int {
+        return a + b;
+    }
+
+    fn main() {
+        print(add(3, 4));
+    }
+
+When compiled with -O speed, the add call is fully inlined and the optimizer
+can constant-fold the result.
+
+Optimization Levels
+-------------------
+
+The compiler supports three optimization levels via the -O flag:
+
+    cargo run -- <FILE> -O none           # no optimizations (default)
+    cargo run -- <FILE> -O speed          # optimize for execution speed
+    cargo run -- <FILE> -O speed-and-size # optimize for speed and code size
 
 
 Project Layout
@@ -112,6 +145,7 @@ The pipeline is:
     Codegen (codegen.rs) -- two-pass Cranelift compilation:
        1. Declare all functions (enables forward references)
        2. Define each function body as Cranelift IR
+       3. Inline marked functions at call sites via ctx.inline()
          |
          v
     Linker (cc) -- links object file with a small C runtime
@@ -119,9 +153,9 @@ The pipeline is:
          v
     Native binary (./output or custom name via -o)
 
-The C runtime provides print_int() and print_str() so the print() built-in
-works. It is compiled and linked automatically — you don't need to do
-anything special.
+The C runtime provides print_int(), print_str(), and argument access functions
+so the built-ins work. It is compiled and linked automatically — you don't
+need to do anything special.
 
 
 Architecture Note: Why ECS?

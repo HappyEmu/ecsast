@@ -19,6 +19,7 @@ The compiler accepts a `.ecs` source file as a positional argument and produces 
 ```bash
 cargo run -- <FILE>              # compile to ./output
 cargo run -- <FILE> -o <NAME>    # compile to custom output path
+cargo run -- <FILE> -O speed     # compile with optimizations
 ```
 
 Examples:
@@ -26,6 +27,7 @@ Examples:
 ```bash
 cargo run -- examples/hello.ecs && ./output           # prints "Hello, world!"
 cargo run -- examples/fizzbuzz.ecs -o fizz && ./fizz   # prints fizzbuzz
+cargo run -- examples/add.ecs -o add -O speed          # inline fn demo
 ```
 
 The CLI is built with `clap` (derive mode). See `src/main.rs` for the `Cli` struct.
@@ -77,21 +79,28 @@ Passes are lazy and independent: the parser only fills `kinds`/`spans`; each pas
 
 ### Cranelift Codegen Details
 
-The `Compiler` struct in `codegen.rs` holds the `ObjectModule`, declared function IDs, and string data sections. Compilation is two-pass:
+The `Compiler` struct in `codegen.rs` holds the `ObjectModule`, declared function IDs, string data sections, and inline function tracking. Compilation is two-pass:
 
-1. **Declaration pass**: iterate all `FnDecl` nodes, build Cranelift signatures, call `module.declare_function()`, populate `user_funcs` map. This enables forward references and recursion.
-2. **Definition pass**: for each `FnDecl`, generate IR via `FunctionBuilder` and `module.define_function()`.
+1. **Declaration pass**: iterate all `FnDecl` nodes, build Cranelift signatures, call `module.declare_function()`, populate `user_funcs` map. This enables forward references and recursion. Inline functions are tracked in `inline_funcs`.
+2. **Definition pass**: for each `FnDecl`, generate IR via `FunctionBuilder` and `module.define_function()`. For inline functions, the compiled `Function` IR is saved in `inline_bodies`. Before defining any function, `ctx.inline()` is called with the `Inliner` to inline marked callees.
 
 Key internal types:
 - **`FnCtx`** — per-function context holding `Variable` map, function refs, and return type
 - **`ValType`** — `{ I64, Bool }` enum for type tracking; `compile_expr` returns `(Value, ValType)` and `coerce()` inserts `uextend`/`ireduce` as needed
+- **`Inliner`** — implements Cranelift's `Inline` trait; resolves `FuncRef` → `FuncId` via `UserExternalName` and returns `InlineCommand::Inline` with the saved function body for inline-marked callees
 
 Control flow patterns:
 - **if/else**: `brif` → then/else blocks → merge block; tracks termination to avoid emitting jumps after `return`
 - **while**: header block (sealed after back-edge) → body → back-edge jump; exit block
 - **return**: emits `return_` instruction and marks block as terminated
 
-C runtime (`RUNTIME_C`): compiled and linked automatically; provides `print_int(long)` and `print_str(const char*, long)`.
+C runtime (`RUNTIME_C`): compiled and linked automatically; provides `print_int(long)`, `print_str(const char*, long)`, `ecsast_init_args(int, char**)`, `ecsast_argc()`, and `ecsast_arg(long, const char**, long*)`.
+
+### Cranelift API Notes (v0.128)
+
+- **`FunctionBuilder::declare_var(ty) -> Variable`** — allocates and returns a new variable. Unlike older versions, you do not pass a `Variable` in; the builder assigns one for you.
+- **`Context::inline(&mut impl Inline)`** — performs function inlining on the IR before `define_function()`. The `Inline` trait has a single method that returns `InlineCommand::Inline` or `InlineCommand::KeepCall`.
+- **`FuncRef` → `FuncId` resolution** — access `caller.stencil.dfg.ext_funcs[callee].name` to get the `ExternalName::User(name_ref)`, then resolve via `caller.params.user_named_funcs()[name_ref].index` which equals `FuncId::as_u32()`.
 
 ### Language Grammar
 
@@ -123,6 +132,8 @@ Supported constructs:
 - **Operators**: `+ - * / %`, `== != < <= > >=`, `&& ||`, unary `! -`
 - **Statements**: `let x: T = expr;`, `x = expr;`, `return expr;`, `if`/`else`, `while`
 - **Functions**: `fn name(params) -> ReturnType { body }` (return type optional)
+- **Inline functions**: `inline fn name(params) -> ReturnType { body }` — inlined at call sites by Cranelift
+- **Built-ins**: `print()` (int, bool, str), `argc()`, `arg(i)` (command-line arguments)
 - **Entry point**: program must define a `fn main()` with no parameters
 
 ### Tests
@@ -130,3 +141,14 @@ Supported constructs:
 - **Parser unit tests** live in `src/parser.rs` (inline `#[cfg(test)]` module). They test parse-tree structure by querying `AstWorld` after parsing.
 - **End-to-end codegen tests** live in `tests/compile_and_run.rs`. They compile example programs from `tests/programs/`, run the resulting binaries, and assert on stdout output.
 - **Example programs** in `examples/` (`.ecs` files) can be compiled directly with `cargo run -- examples/<name>.ecs`.
+
+### Adding a New Language Feature
+
+Typical workflow for adding a new keyword or construct:
+
+1. **Lexer** (`lexer.rs`): add a `TokenKind` variant and a keyword match arm in `lex_ident_or_keyword`
+2. **AST** (`ast.rs`): add or extend a `NodeKind` variant with new fields
+3. **Parser** (`parser.rs`): update `parse_item`/`parse_stmt`/`parse_expr` to handle the new token and produce the new `NodeKind`
+4. **Codegen** (`codegen.rs`): update pattern matches on `NodeKind` in `compile_stmt`/`compile_expr` and add IR generation
+5. **Other modules**: update pattern matches in `printer.rs`, `passes.rs`, `interpreter.rs` (use `..` in patterns to avoid breakage from new fields)
+6. **Tests**: add a test program in `tests/programs/<name>/` with `source.ecs` and `expected_output`, add a test function in `tests/compile_and_run.rs`
