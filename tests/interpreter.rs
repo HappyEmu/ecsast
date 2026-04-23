@@ -4,6 +4,7 @@ use bumpalo::Bump;
 use ecsast::interpreter;
 use ecsast::lexer::Lexer;
 use ecsast::parser::Parser;
+use ecsast::passes;
 
 fn run_interpreter_test(name: &str) {
     let base = format!("tests/programs/{name}");
@@ -17,7 +18,8 @@ fn run_interpreter_test(name: &str) {
     let arena = Bump::new();
     let mut parser = Parser::new(&tokens, &arena);
     let root = parser.parse_program();
-    let world = parser.world;
+    let mut world = parser.world;
+    passes::analyze_program(&mut world, root).expect("analysis failed");
 
     let mut output = Vec::new();
     interpreter::run_program_with_output(&world, root, &mut output);

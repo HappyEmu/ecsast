@@ -6,6 +6,7 @@ use clap::{Parser as ClapParser, ValueEnum};
 use ecsast::codegen::{self, OptLevel};
 use ecsast::lexer::Lexer;
 use ecsast::parser::Parser;
+use ecsast::passes;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum CliOptLevel {
@@ -50,15 +51,26 @@ struct Cli {
 fn print_timings(
     lex_time: std::time::Duration,
     parse_time: std::time::Duration,
+    analysis_time: std::time::Duration,
     codegen_time: std::time::Duration,
     src_len: usize,
 ) {
     let src_bytes = src_len as f64;
     let mb = |d: std::time::Duration| src_bytes / d.as_secs_f64() / (1024.0 * 1024.0);
-    let total = lex_time + parse_time + codegen_time;
+    let total = lex_time + parse_time + analysis_time + codegen_time;
     eprintln!("  lex:     {lex_time:>10.3?}  ({:>8.2} MB/s)", mb(lex_time));
-    eprintln!("  parse:   {parse_time:>10.3?}  ({:>8.2} MB/s)", mb(parse_time));
-    eprintln!("  codegen: {codegen_time:>10.3?}  ({:>8.2} MB/s)", mb(codegen_time));
+    eprintln!(
+        "  parse:   {parse_time:>10.3?}  ({:>8.2} MB/s)",
+        mb(parse_time)
+    );
+    eprintln!(
+        "  analyze: {analysis_time:>10.3?}  ({:>8.2} MB/s)",
+        mb(analysis_time)
+    );
+    eprintln!(
+        "  codegen: {codegen_time:>10.3?}  ({:>8.2} MB/s)",
+        mb(codegen_time)
+    );
     eprintln!("  total:   {:>10.3?}  ({:>8.2} MB/s)", total, mb(total));
 }
 
@@ -79,17 +91,24 @@ fn main() {
     let t1 = Instant::now();
     let root = parser.parse_program();
     let parse_time = t1.elapsed();
-    let world = parser.world;
+    let mut world = parser.world;
+
+    let t2 = Instant::now();
+    if let Err(err) = passes::analyze_program(&mut world, root) {
+        eprintln!("Analysis error: {err}");
+        std::process::exit(1);
+    }
+    let analysis_time = t2.elapsed();
 
     let output = cli.output.to_str().expect("invalid output path");
-    let t2 = Instant::now();
+    let t3 = Instant::now();
     codegen::compile_to_executable(&world, root, output, cli.opt_level.into())
         .expect("compilation failed");
-    let codegen_time = t2.elapsed();
+    let codegen_time = t3.elapsed();
 
     println!("Compiled {} -> {output}", cli.file.display());
 
     if cli.time {
-        print_timings(lex_time, parse_time, codegen_time, src.len());
+        print_timings(lex_time, parse_time, analysis_time, codegen_time, src.len());
     }
 }

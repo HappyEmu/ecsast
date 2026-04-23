@@ -5,6 +5,7 @@ use bumpalo::Bump;
 use ecsast::codegen::{self, OptLevel};
 use ecsast::lexer::Lexer;
 use ecsast::parser::Parser;
+use ecsast::passes;
 use tempfile::TempDir;
 
 fn run_program_test(name: &str) {
@@ -23,7 +24,8 @@ fn run_program_test_with_args(name: &str, args: &[&str]) {
     let arena = Bump::new();
     let mut parser = Parser::new(&tokens, &arena);
     let root = parser.parse_program();
-    let world = parser.world;
+    let mut world = parser.world;
+    passes::analyze_program(&mut world, root).expect("analysis failed");
 
     let tmp_dir = TempDir::new().expect("failed to create temp dir");
     let output_path = tmp_dir.path().join("output");

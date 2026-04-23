@@ -25,5 +25,5 @@ pub fn compile_to_executable(
     let compiler = Compiler::new(world, opt_level)?;
     let program = compiler.compile(root)?;
 
-    return link::link_program(program, output_path);
+    link::link_program(program, output_path)
 }
