@@ -14,4 +14,9 @@ target-lexicon = "0.13"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "compiler_pipeline"
+harness = false
