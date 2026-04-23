@@ -1,0 +1,33 @@
+fn swim(pos: int) {
+    if pos == 0  { print("><>                              "); }
+    if pos == 1  { print("   ><>                           "); }
+    if pos == 2  { print("      ><>                        "); }
+    if pos == 3  { print("         ><>                     "); }
+    if pos == 4  { print("            ><>                  "); }
+    if pos == 5  { print("               ><>               "); }
+    if pos == 6  { print("                  ><>            "); }
+    if pos == 7  { print("                     ><>         "); }
+    if pos == 8  { print("                        ><>      "); }
+    if pos == 9  { print("                           ><>   "); }
+    if pos == 10 { print("                              ><>"); }
+}
+
+fn main() {
+    print("~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.");
+    print("         F I S H   T A N K        ");
+    print("~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.");
+    print("");
+
+    let t: int = 0;
+    while t < 60 {
+        let pos: int = t % 20;
+        if pos > 10 {
+            pos = 20 - pos;
+        }
+        swim(pos);
+        t = t + 1;
+    }
+
+    print("");
+    print("~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.");
+}
