@@ -2,6 +2,7 @@ use std::hint::black_box;
 
 use bumpalo::Bump;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use ecsast::ast::AstWorld;
 use ecsast::lexer::Lexer;
 use ecsast::parser::Parser;
 use ecsast::passes;
@@ -25,19 +26,41 @@ fn lex_source(src: &str) -> usize {
 fn parse_source(src: &str) -> usize {
     let tokens = Lexer::new(src).tokenize();
     let arena = Bump::new();
-    let mut parser = Parser::new(black_box(&tokens), &arena);
-    let root = parser.parse_program();
+    let mut world = AstWorld::new();
+    let mut parser = Parser::new(black_box(&tokens), &arena, &mut world);
+    let root = parser.parse_file();
     black_box(root);
-    parser.world.kinds.len()
+    world.kinds.len()
 }
 
 fn analyze_source(src: &str) -> usize {
+    // Synthesize a one-module graph in-memory so we can drive `analyze` without
+    // touching the filesystem.
+    use ecsast::modules::{Module, ModuleGraph, ModuleId};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
     let tokens = Lexer::new(src).tokenize();
     let arena = Bump::new();
-    let mut parser = Parser::new(&tokens, &arena);
-    let root = parser.parse_program();
-    let mut world = parser.world;
-    passes::analyze_program(&mut world, root).expect("analysis failed");
+    let mut world = AstWorld::new();
+    let mut parser = Parser::new(&tokens, &arena, &mut world);
+    let root = parser.parse_file();
+
+    let mut by_path = HashMap::new();
+    by_path.insert(Vec::<String>::new(), ModuleId(0));
+    let mut graph = ModuleGraph {
+        modules: vec![Module {
+            id: ModuleId(0),
+            file_path: PathBuf::from("<bench>"),
+            mod_path: Vec::new(),
+            root,
+            imports: HashMap::new(),
+            module_aliases: HashMap::new(),
+        }],
+        by_path,
+        entry: ModuleId(0),
+    };
+    passes::analyze(&mut world, &mut graph).expect("analysis failed");
     world.types.len() + world.resolved.len() + world.parents.len()
 }
 

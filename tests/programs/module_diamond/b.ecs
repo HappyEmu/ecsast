@@ -1,0 +1,5 @@
+use util::base;
+
+pub fn from_b() -> int {
+    return base() + 2;
+}

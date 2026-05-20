@@ -1,0 +1,7 @@
+pub fn go() -> int {
+    return 7;
+}
+
+fn main() {
+    print(go());
+}

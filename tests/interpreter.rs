@@ -1,28 +1,35 @@
 use std::fs;
+use std::path::PathBuf;
 
 use bumpalo::Bump;
+use ecsast::ast::AstWorld;
 use ecsast::interpreter;
-use ecsast::lexer::Lexer;
-use ecsast::parser::Parser;
+use ecsast::modules;
 use ecsast::passes;
 
+fn entry_for(name: &str) -> PathBuf {
+    let base = PathBuf::from(format!("tests/programs/{name}"));
+    let main = base.join("main.ecs");
+    if main.exists() {
+        main
+    } else {
+        base.join("source.ecs")
+    }
+}
+
 fn run_interpreter_test(name: &str) {
-    let base = format!("tests/programs/{name}");
-    let source = fs::read_to_string(format!("{base}/source.ecs"))
-        .unwrap_or_else(|e| panic!("failed to read source for {name}: {e}"));
-    let expected = fs::read_to_string(format!("{base}/expected_output"))
+    let entry = entry_for(name);
+    let expected = fs::read_to_string(format!("tests/programs/{name}/expected_output"))
         .unwrap_or_else(|e| panic!("failed to read expected_output for {name}: {e}"));
 
-    let tokens = Lexer::new(&source).tokenize();
-
     let arena = Bump::new();
-    let mut parser = Parser::new(&tokens, &arena);
-    let root = parser.parse_program();
-    let mut world = parser.world;
-    passes::analyze_program(&mut world, root).expect("analysis failed");
+    let mut world = AstWorld::new();
+    let mut graph = modules::ModuleGraph::load(&entry, &arena, &mut world)
+        .unwrap_or_else(|e| panic!("module load failed for {name}: {e}"));
+    passes::analyze(&mut world, &mut graph).expect("analysis failed");
 
     let mut output = Vec::new();
-    interpreter::run_program_with_output(&world, root, &mut output);
+    interpreter::run_with_output(&world, &graph, &mut output);
 
     let stdout = String::from_utf8(output).expect("non-UTF8 output");
     assert_eq!(stdout, expected, "output mismatch for program '{name}'");
@@ -101,4 +108,24 @@ fn stress() {
 #[test]
 fn strings() {
     run_interpreter_test("strings");
+}
+
+#[test]
+fn module_basic() {
+    run_interpreter_test("module_basic");
+}
+
+#[test]
+fn module_nested() {
+    run_interpreter_test("module_nested");
+}
+
+#[test]
+fn module_alias() {
+    run_interpreter_test("module_alias");
+}
+
+#[test]
+fn module_diamond() {
+    run_interpreter_test("module_diamond");
 }

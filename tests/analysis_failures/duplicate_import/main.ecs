@@ -1,0 +1,6 @@
+use math::square;
+use math::square;
+
+fn main() {
+    print(square(2));
+}

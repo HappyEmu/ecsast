@@ -23,9 +23,15 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
             ret_ty,
             body,
             inline,
+            is_pub,
         } => {
             let inl = if *inline { " (inline)" } else { "" };
-            println!("{pad}FnDecl `{name}`{inl} [{s}..{e}]", s = sp.start, e = sp.end);
+            let vis = if *is_pub { "pub " } else { "" };
+            println!(
+                "{pad}{vis}FnDecl `{name}`{inl} [{s}..{e}]",
+                s = sp.start,
+                e = sp.end
+            );
             for &p in *params {
                 print_ast(world, p, indent + 1);
             }
@@ -33,6 +39,22 @@ pub fn print_ast(world: &AstWorld<'_>, id: NodeId, indent: usize) {
                 print_ast(world, *ty_node, indent + 1);
             }
             print_ast(world, *body, indent + 1);
+        }
+        NodeKind::UseDecl { path } => {
+            println!(
+                "{pad}Use `{}` [{s}..{e}]",
+                path.join("::"),
+                s = sp.start,
+                e = sp.end
+            );
+        }
+        NodeKind::Path { segments } => {
+            println!(
+                "{pad}Path `{}` [{s}..{e}]",
+                segments.join("::"),
+                s = sp.start,
+                e = sp.end
+            );
         }
         NodeKind::Param { name, ty: ty_node } => {
             println!("{pad}Param `{name}` [{s}..{e}]", s = sp.start, e = sp.end);

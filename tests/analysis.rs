@@ -1,18 +1,39 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use bumpalo::Bump;
 use ecsast::ast::{AstWorld, NodeKind, TypeInfo};
 use ecsast::lexer::Lexer;
+use ecsast::modules::{Module, ModuleGraph, ModuleId};
 use ecsast::parser::Parser;
 use ecsast::passes;
 
+/// Build a single-module graph from the given source — used by tests that
+/// don't need the multi-module loader.
 fn analyze<'arena>(
     src: &str,
     arena: &'arena Bump,
 ) -> Result<AstWorld<'arena>, passes::AnalysisError> {
     let tokens = Lexer::new(src).tokenize();
-    let mut parser = Parser::new(&tokens, arena);
-    let root = parser.parse_program();
-    let mut world = parser.world;
-    passes::analyze_program(&mut world, root)?;
+    let mut world = AstWorld::new();
+    let mut parser = Parser::new(&tokens, arena, &mut world);
+    let root = parser.parse_file();
+
+    let mut by_path = HashMap::new();
+    by_path.insert(Vec::<String>::new(), ModuleId(0));
+    let mut graph = ModuleGraph {
+        modules: vec![Module {
+            id: ModuleId(0),
+            file_path: PathBuf::from("<test>"),
+            mod_path: Vec::new(),
+            root,
+            imports: HashMap::new(),
+            module_aliases: HashMap::new(),
+        }],
+        by_path,
+        entry: ModuleId(0),
+    };
+    passes::analyze(&mut world, &mut graph)?;
     Ok(world)
 }
 

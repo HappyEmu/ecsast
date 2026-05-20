@@ -1,0 +1,5 @@
+use math::geometry::area;
+
+fn main() {
+    print(area(4, 5));
+}

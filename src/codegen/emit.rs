@@ -22,6 +22,7 @@ use target_lexicon::Triple;
 use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind};
 use crate::codegen::OptLevel;
 use crate::codegen::runtime::{RuntimeFn, declare_runtime};
+use crate::modules::ModuleGraph;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ValType {
@@ -141,20 +142,34 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
     }
 
-    fn declare_functions(&mut self, items: &[NodeId]) -> Result<(), Box<dyn Error>> {
+    fn declare_functions(
+        &mut self,
+        graph: &ModuleGraph,
+    ) -> Result<(), Box<dyn Error>> {
         let ptr_type = self.module.target_config().pointer_type();
-        for &id in items {
-            if let NodeKind::FnDecl {
-                name,
-                params,
-                ret_ty,
-                inline,
-                ..
-            } = *self.world.kind(id)
-            {
-                if name == "main" {
-                    continue; // main is handled specially (returns i32)
+        for module in &graph.modules {
+            let items = match *self.world.kind(module.root) {
+                NodeKind::Program(items) => items,
+                _ => continue,
+            };
+            for &id in items {
+                let NodeKind::FnDecl {
+                    name,
+                    params,
+                    ret_ty,
+                    inline,
+                    ..
+                } = *self.world.kind(id)
+                else {
+                    continue;
+                };
+
+                let mangled = self.world.mangled_names[id].clone();
+                let is_entry_main = module.id == graph.entry && name == "main";
+                if is_entry_main {
+                    continue; // entry-module main is declared by define_main
                 }
+
                 let mut sig = self.module.make_signature();
                 let mut param_types = Vec::new();
                 for &param_id in params {
@@ -166,7 +181,6 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         param_types.push(vt);
                         match vt {
                             ValType::Str => {
-                                // Strings are passed as (ptr, len) pair
                                 sig.params.push(AbiParam::new(ptr_type));
                                 sig.params.push(AbiParam::new(types::I64));
                             }
@@ -181,10 +195,10 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         self.resolve_type_name(ret_id).as_cranelift_type(),
                     ));
                 }
-                let func_id = self.module.declare_function(name, Linkage::Local, &sig)?;
+                let func_id = self.module.declare_function(&mangled, Linkage::Local, &sig)?;
                 let ret_vt = ret_ty.map(|id| self.resolve_type_name(id));
                 self.user_funcs.insert(
-                    name.to_string(),
+                    mangled.clone(),
                     UserFunc {
                         id: func_id,
                         return_type: ret_vt,
@@ -192,7 +206,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     },
                 );
                 if inline {
-                    self.inline_funcs.insert(name.to_string());
+                    self.inline_funcs.insert(mangled);
                 }
             }
         }
@@ -223,30 +237,34 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         (data_id, len)
     }
 
-    pub fn compile(mut self, root: NodeId) -> Result<ObjectProduct, Box<dyn Error>> {
-        let items = match self.world.kind(root) {
-            NodeKind::Program(items) => *items,
-            _ => return Err("root must be a Program node".into()),
-        };
+    pub fn compile(mut self, graph: &ModuleGraph) -> Result<ObjectProduct, Box<dyn Error>> {
+        // Pass 1: declare every user function across every module.
+        self.declare_functions(graph)?;
 
-        // Pass 1: declare all user functions
-        self.declare_functions(items)?;
-
-        // Pass 2: define all functions
+        // Pass 2: define each function body. Entry-module `main` is special.
         let mut func_ctx = FunctionBuilderContext::new();
-        for &id in items {
-            if let NodeKind::FnDecl {
-                name,
-                params,
-                ret_ty,
-                body,
-                ..
-            } = *self.world.kind(id)
-            {
-                if name == "main" {
+        for module in &graph.modules {
+            let items = match *self.world.kind(module.root) {
+                NodeKind::Program(items) => items,
+                _ => continue,
+            };
+            let is_entry = module.id == graph.entry;
+            for &id in items {
+                let NodeKind::FnDecl {
+                    name,
+                    params,
+                    ret_ty,
+                    body,
+                    ..
+                } = *self.world.kind(id)
+                else {
+                    continue;
+                };
+                if is_entry && name == "main" {
                     self.define_main(body, &mut func_ctx)?;
                 } else {
-                    self.define_user_func(name, params, ret_ty, body, &mut func_ctx)?;
+                    let mangled = self.world.mangled_names[id].clone();
+                    self.define_user_func(&mangled, params, ret_ty, body, &mut func_ctx)?;
                 }
             }
         }
@@ -670,49 +688,49 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     }
 
     /// Compile a call to a user-defined function.
+    ///
+    /// R4: follow `world.resolved[callee] → FnDecl → mangled_names[FnDecl] → user_funcs`.
+    /// No name strings live in the AST; codegen never recomputes mangling.
     fn compile_call(
         &mut self,
         callee: NodeId,
         args: &[NodeId],
         ctx: &mut BuildCtx,
     ) -> Option<ExprResult> {
-        let fn_name = match self.world.kind(callee) {
-            NodeKind::Ident(name) => *name,
-            _ => panic!("callee must be an identifier"),
-        };
+        let target_fn = self.world.resolved[callee];
+        let mangled = self.world.mangled_names[target_fn].clone();
+        let fref = *ctx
+            .func_refs
+            .get(&mangled)
+            .unwrap_or_else(|| panic!("undeclared function: {mangled}"));
+        let uf = &self.user_funcs[&mangled];
+        let param_types = uf.param_types.clone();
+        let return_type = uf.return_type;
 
-        if let Some(&fref) = ctx.func_refs.get(fn_name) {
-            let uf = &self.user_funcs[fn_name];
-            let param_types = uf.param_types.clone();
-            let return_type = uf.return_type;
-
-            let mut arg_vals = Vec::new();
-            for (i, &arg_id) in args.iter().enumerate() {
-                let result = self.compile_expr(arg_id, ctx);
-                let expected_ty = param_types.get(i).copied();
-                match (result, expected_ty) {
-                    (ExprResult::Str { ptr, len }, _) => {
-                        arg_vals.push(ptr);
-                        arg_vals.push(len);
-                    }
-                    (ExprResult::Scalar(_val, _), Some(ValType::Str)) => {
-                        panic!("expected string argument for str parameter");
-                    }
-                    (ExprResult::Scalar(val, _val_ty), _) => {
-                        arg_vals.push(val);
-                    }
+        let mut arg_vals = Vec::new();
+        for (i, &arg_id) in args.iter().enumerate() {
+            let result = self.compile_expr(arg_id, ctx);
+            let expected_ty = param_types.get(i).copied();
+            match (result, expected_ty) {
+                (ExprResult::Str { ptr, len }, _) => {
+                    arg_vals.push(ptr);
+                    arg_vals.push(len);
+                }
+                (ExprResult::Scalar(_val, _), Some(ValType::Str)) => {
+                    panic!("expected string argument for str parameter");
+                }
+                (ExprResult::Scalar(val, _val_ty), _) => {
+                    arg_vals.push(val);
                 }
             }
-            let call = ctx.builder.ins().call(fref, &arg_vals);
-            let results = ctx.builder.inst_results(call);
-            if results.is_empty() {
-                None
-            } else {
-                let ret_vt = return_type.unwrap_or(ValType::I64);
-                Some(ExprResult::Scalar(results[0], ret_vt))
-            }
+        }
+        let call = ctx.builder.ins().call(fref, &arg_vals);
+        let results = ctx.builder.inst_results(call);
+        if results.is_empty() {
+            None
         } else {
-            panic!("undefined function: {fn_name}");
+            let ret_vt = return_type.unwrap_or(ValType::I64);
+            Some(ExprResult::Scalar(results[0], ret_vt))
         }
     }
 

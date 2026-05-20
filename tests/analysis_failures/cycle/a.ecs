@@ -1,0 +1,5 @@
+use b::from_b;
+
+pub fn from_a() -> int {
+    return from_b() + 1;
+}

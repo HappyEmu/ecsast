@@ -13,11 +13,11 @@ use crate::span::Span;
 // rather than one function level per precedence tier.
 // ---------------------------------------------------------------------------
 
-pub struct Parser<'src, 'arena> {
+pub struct Parser<'src, 'arena, 'w> {
     tokens: &'src [Token],
     pos: usize,
     arena: &'arena Bump,
-    pub world: AstWorld<'arena>,
+    pub world: &'w mut AstWorld<'arena>,
 }
 
 // ---------------------------------------------------------------------------
@@ -73,13 +73,17 @@ fn token_to_binop(kind: &TokenKind) -> BinOp {
 // Core parser helpers
 // ---------------------------------------------------------------------------
 
-impl<'src, 'arena> Parser<'src, 'arena> {
-    pub fn new(tokens: &'src [Token], arena: &'arena Bump) -> Self {
+impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
+    pub fn new(
+        tokens: &'src [Token],
+        arena: &'arena Bump,
+        world: &'w mut AstWorld<'arena>,
+    ) -> Self {
         Self {
             tokens,
             pos: 0,
             arena,
-            world: AstWorld::new(),
+            world,
         }
     }
 
@@ -145,10 +149,11 @@ impl<'src, 'arena> Parser<'src, 'arena> {
 // Grammar
 // ---------------------------------------------------------------------------
 
-impl<'src, 'arena> Parser<'src, 'arena> {
+impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
     // ---- Top level ---------------------------------------------------------
 
-    pub fn parse_program(&mut self) -> NodeId {
+    /// Parse a single source file as a `Program` node.
+    pub fn parse_file(&mut self) -> NodeId {
         let start = self.start_span();
         let mut items = Vec::new();
         while !self.at(&TokenKind::Eof) {
@@ -163,18 +168,63 @@ impl<'src, 'arena> Parser<'src, 'arena> {
 
     fn parse_item(&mut self) -> NodeId {
         match self.peek() {
+            TokenKind::Use => self.parse_use_decl(),
+            TokenKind::Pub => {
+                self.advance();
+                match self.peek() {
+                    TokenKind::Inline => {
+                        self.advance();
+                        self.parse_fn_decl(true, true)
+                    }
+                    TokenKind::Fn => self.parse_fn_decl(false, true),
+                    other => panic!("expected `fn` or `inline` after `pub`, got {:?}", other),
+                }
+            }
             TokenKind::Inline => {
                 self.advance();
-                self.parse_fn_decl(true)
+                self.parse_fn_decl(true, false)
             }
-            TokenKind::Fn => self.parse_fn_decl(false),
+            TokenKind::Fn => self.parse_fn_decl(false, false),
             other => panic!("expected top-level item, got {:?}", other),
         }
     }
 
+    // ---- Use declaration ----------------------------------------------------
+
+    fn parse_use_decl(&mut self) -> NodeId {
+        let start = self.start_span();
+        self.expect(&TokenKind::Use);
+
+        let mut segments: Vec<&'arena str> = Vec::new();
+        let first = self.advance();
+        match first.kind {
+            TokenKind::Ident(s) => segments.push(self.arena.alloc_str(&s)),
+            other => panic!("expected ident after `use`, got {:?}", other),
+        }
+        while self.eat(&TokenKind::ColonColon) {
+            // A trailing `*` is left in the path so the semantic pass can emit
+            // a precise "glob imports not supported" error.
+            if self.at(&TokenKind::Star) {
+                self.advance();
+                segments.push("*");
+                break;
+            }
+            let next = self.advance();
+            match next.kind {
+                TokenKind::Ident(s) => segments.push(self.arena.alloc_str(&s)),
+                other => panic!("expected ident after `::`, got {:?}", other),
+            }
+        }
+        let end = self.peek_token().span.end;
+        self.expect(&TokenKind::Semicolon);
+        let path = self.arena.alloc_slice_copy(&segments);
+        self.world
+            .alloc(NodeKind::UseDecl { path }, Span::new(start, end))
+    }
+
     // ---- Function declaration -----------------------------------------------
 
-    fn parse_fn_decl(&mut self, inline: bool) -> NodeId {
+    fn parse_fn_decl(&mut self, inline: bool, is_pub: bool) -> NodeId {
         let start = self.start_span();
         self.expect(&TokenKind::Fn);
 
@@ -208,6 +258,7 @@ impl<'src, 'arena> Parser<'src, 'arena> {
                 ret_ty,
                 body,
                 inline,
+                is_pub,
             },
             Span::new(start, end),
         )
@@ -484,18 +535,49 @@ impl<'src, 'arena> Parser<'src, 'arena> {
                 let end = self.peek_token().span.end;
                 self.expect(&TokenKind::RParen);
                 let args_slice = self.arena.alloc_slice_copy(&args);
-                // Resolve built-in names at parse time so later stages can
-                // match on an enum variant rather than comparing strings.
+
+                // R3: every Call.callee is a Path. Bare `name(...)` calls
+                // get a one-segment Path so downstream lookup has a single
+                // shape. Built-in names short-circuit to BuiltinCall, which
+                // has no callee field at all.
                 expr = match *self.world.kind(expr) {
-                    NodeKind::Ident(name) if Builtin::from_name(name).is_some() => {
-                        let builtin = Builtin::from_name(name).unwrap();
-                        self.world.alloc(
-                            NodeKind::BuiltinCall { builtin, args: args_slice },
-                            Span::new(start, end),
-                        )
+                    NodeKind::Ident(name) => {
+                        if let Some(builtin) = Builtin::from_name(name) {
+                            self.world.alloc(
+                                NodeKind::BuiltinCall {
+                                    builtin,
+                                    args: args_slice,
+                                },
+                                Span::new(start, end),
+                            )
+                        } else {
+                            let seg_slice: &[&str] = self.arena.alloc_slice_copy(&[name]);
+                            let ident_span = self.world.span(expr);
+                            let path = self.world.alloc(
+                                NodeKind::Path { segments: seg_slice },
+                                ident_span,
+                            );
+                            self.world.alloc(
+                                NodeKind::Call {
+                                    callee: path,
+                                    args: args_slice,
+                                },
+                                Span::new(start, end),
+                            )
+                        }
                     }
+                    NodeKind::Path { .. } => self.world.alloc(
+                        NodeKind::Call {
+                            callee: expr,
+                            args: args_slice,
+                        },
+                        Span::new(start, end),
+                    ),
                     _ => self.world.alloc(
-                        NodeKind::Call { callee: expr, args: args_slice },
+                        NodeKind::Call {
+                            callee: expr,
+                            args: args_slice,
+                        },
                         Span::new(start, end),
                     ),
                 };
@@ -516,9 +598,29 @@ impl<'src, 'arena> Parser<'src, 'arena> {
             TokenKind::Str(s) => self
                 .world
                 .alloc(NodeKind::StringLit(self.arena.alloc_str(&s)), tok.span),
-            TokenKind::Ident(name) => self
-                .world
-                .alloc(NodeKind::Ident(self.arena.alloc_str(&name)), tok.span),
+            TokenKind::Ident(name) => {
+                // `foo::bar::baz` → Path. Bare `foo` stays Ident (it may refer
+                // to a local). The wrap-in-Path step for callees happens in
+                // parse_postfix when we see the trailing `(`.
+                if self.at(&TokenKind::ColonColon) {
+                    let start = tok.span.start;
+                    let mut segments: Vec<&'arena str> = vec![self.arena.alloc_str(&name)];
+                    while self.eat(&TokenKind::ColonColon) {
+                        let next = self.advance();
+                        match next.kind {
+                            TokenKind::Ident(s) => segments.push(self.arena.alloc_str(&s)),
+                            other => panic!("expected ident after `::`, got {:?}", other),
+                        }
+                    }
+                    let end = self.tokens[self.pos - 1].span.end;
+                    let segs = self.arena.alloc_slice_copy(&segments);
+                    self.world
+                        .alloc(NodeKind::Path { segments: segs }, Span::new(start, end))
+                } else {
+                    self.world
+                        .alloc(NodeKind::Ident(self.arena.alloc_str(&name)), tok.span)
+                }
+            }
             TokenKind::LParen => {
                 let inner = self.parse_expr();
                 self.expect(&TokenKind::RParen);
@@ -545,9 +647,10 @@ mod tests {
 
     fn parse<'a>(src: &str, arena: &'a Bump) -> (AstWorld<'a>, NodeId) {
         let tokens = Lexer::new(src).tokenize();
-        let mut p = Parser::new(&tokens, arena);
-        let root = p.parse_program();
-        (p.world, root)
+        let mut world = AstWorld::new();
+        let mut p = Parser::new(&tokens, arena, &mut world);
+        let root = p.parse_file();
+        (world, root)
     }
 
     /// Return the children slice stored inside a `Program` or `Block` node.
@@ -589,6 +692,7 @@ mod tests {
             ret_ty,
             body,
             inline,
+            ..
         } = *world.kind(items[0])
         else {
             panic!("expected FnDecl");
@@ -1245,6 +1349,15 @@ mod tests {
 
     // --- calls ---
 
+    /// Helper: assert that a callee node is a one-segment Path with the given name.
+    fn assert_single_path(world: &AstWorld<'_>, callee: NodeId, expected: &str) {
+        let NodeKind::Path { segments } = *world.kind(callee) else {
+            panic!("expected Path callee, got {:?}", world.kind(callee));
+        };
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], expected);
+    }
+
     #[test]
     fn call_no_args() {
         let arena = Bump::new();
@@ -1254,7 +1367,7 @@ mod tests {
         let NodeKind::Call { callee, args } = *world.kind(children(&world, body)[0]) else {
             panic!()
         };
-        assert!(matches!(*world.kind(callee), NodeKind::Ident("foo")));
+        assert_single_path(&world, callee, "foo");
         assert!(args.is_empty());
     }
 
@@ -1267,7 +1380,7 @@ mod tests {
         let NodeKind::Call { callee, args } = *world.kind(children(&world, body)[0]) else {
             panic!()
         };
-        assert!(matches!(*world.kind(callee), NodeKind::Ident("add")));
+        assert_single_path(&world, callee, "add");
         assert_eq!(args.len(), 2);
         assert!(matches!(*world.kind(args[0]), NodeKind::IntLit(1)));
         assert!(matches!(*world.kind(args[1]), NodeKind::IntLit(2)));
@@ -1293,8 +1406,57 @@ mod tests {
         else {
             panic!("expected inner Call for add")
         };
-        assert!(matches!(*world.kind(inner_c), NodeKind::Ident("add")));
+        assert_single_path(&world, inner_c, "add");
         assert_eq!(inner_a.len(), 2);
+    }
+
+    #[test]
+    fn path_call_two_segments() {
+        let arena = Bump::new();
+        let (world, root) = parse("fn main() { math::sqrt(4); }", &arena);
+
+        let body = fn_body(&world, first_fn(&world, root));
+        let NodeKind::Call { callee, args } = *world.kind(children(&world, body)[0]) else {
+            panic!("expected Call");
+        };
+        let NodeKind::Path { segments } = *world.kind(callee) else {
+            panic!("expected Path callee");
+        };
+        assert_eq!(segments, &["math", "sqrt"]);
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn use_decl_single_segment() {
+        let arena = Bump::new();
+        let (world, root) = parse("use math; fn main() {}", &arena);
+        let items = children(&world, root);
+        let NodeKind::UseDecl { path } = *world.kind(items[0]) else {
+            panic!("expected UseDecl");
+        };
+        assert_eq!(path, &["math"]);
+    }
+
+    #[test]
+    fn use_decl_multi_segment() {
+        let arena = Bump::new();
+        let (world, root) = parse("use math::geometry::area; fn main() {}", &arena);
+        let items = children(&world, root);
+        let NodeKind::UseDecl { path } = *world.kind(items[0]) else {
+            panic!("expected UseDecl");
+        };
+        assert_eq!(path, &["math", "geometry", "area"]);
+    }
+
+    #[test]
+    fn pub_fn() {
+        let arena = Bump::new();
+        let (world, root) = parse("pub fn square(n: int) -> int { return n * n; }", &arena);
+        let NodeKind::FnDecl { name, is_pub, .. } = *world.kind(first_fn(&world, root)) else {
+            panic!();
+        };
+        assert_eq!(name, "square");
+        assert!(is_pub);
     }
 
     #[test]
@@ -1340,7 +1502,7 @@ mod tests {
         let NodeKind::Call { callee, args } = *world.kind(children(&world, body)[0]) else {
             panic!("expected Call for user function")
         };
-        assert!(matches!(*world.kind(callee), NodeKind::Ident("foo")));
+        assert_single_path(&world, callee, "foo");
         assert!(args.is_empty());
     }
 

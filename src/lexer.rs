@@ -21,6 +21,8 @@ pub enum TokenKind {
     Else,
     While,
     Return,
+    Use,
+    Pub,
 
     // Arithmetic operators
     Plus,
@@ -55,6 +57,7 @@ pub enum TokenKind {
     Eq,
     Arrow, // ->
     Colon,
+    ColonColon, // ::
     Comma,
     Semicolon,
 
@@ -255,7 +258,12 @@ impl<'a> Lexer<'a> {
             }
             ':' => {
                 self.advance();
-                TokenKind::Colon
+                if self.peek() == Some(':') {
+                    self.advance();
+                    TokenKind::ColonColon
+                } else {
+                    TokenKind::Colon
+                }
             }
             ',' => {
                 self.advance();
@@ -346,6 +354,8 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
             "return" => TokenKind::Return,
+            "use" => TokenKind::Use,
+            "pub" => TokenKind::Pub,
             "true" => TokenKind::Bool(true),
             "false" => TokenKind::Bool(false),
             word => TokenKind::Ident(word.to_string()),

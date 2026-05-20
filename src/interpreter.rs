@@ -3,6 +3,7 @@ use std::fmt;
 use std::io::Write;
 
 use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind, UnaryOp};
+use crate::modules::ModuleGraph;
 
 // ---------------------------------------------------------------------------
 // Runtime values
@@ -62,6 +63,7 @@ impl Flow {
 
 pub struct Env<'w> {
     scopes: Vec<HashMap<String, Value>>,
+    /// Function table keyed by mangled name. Populated once from the module graph.
     fns: HashMap<String, (Vec<NodeId>, NodeId)>,
     out: &'w mut dyn Write,
 }
@@ -114,29 +116,29 @@ impl<'w> Env<'w> {
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// Run a program and capture output into the provided writer.
-pub fn run_program_with_output<W: Write>(
+/// Run a program (multi-module) and capture output into the provided writer.
+pub fn run_with_output<W: Write>(
     world: &AstWorld<'_>,
-    root: NodeId,
+    graph: &ModuleGraph,
     out: &mut W,
 ) -> Value {
     let mut env = Env::new(out);
 
-    // Register all top-level FnDecls
-    let items = match world.kind(root) {
-        NodeKind::Program(items) => *items,
-        _ => panic!("root must be a Program node"),
-    };
-    for item in items.iter().copied() {
-        if let NodeKind::FnDecl {
-            name, params, body, ..
-        } = world.kind(item)
-        {
-            env.fns.insert(name.to_string(), (params.to_vec(), *body));
+    // Register every FnDecl across every module, keyed by mangled name.
+    for module in &graph.modules {
+        let items = match world.kind(module.root) {
+            NodeKind::Program(items) => *items,
+            _ => panic!("module root must be a Program node"),
+        };
+        for item in items.iter().copied() {
+            if let NodeKind::FnDecl { params, body, .. } = world.kind(item) {
+                let mangled = world.mangled_names[item].clone();
+                env.fns.insert(mangled, (params.to_vec(), *body));
+            }
         }
     }
 
-    // Look up and call main
+    // Entry-module `main` is mangled to "main" by the semantic pass.
     let (params, body) = env.fns.get("main").expect("no main function found").clone();
     assert!(params.is_empty(), "main must take no parameters");
 
@@ -146,8 +148,8 @@ pub fn run_program_with_output<W: Write>(
 }
 
 /// Run a program, printing output to stdout.
-pub fn run_program(world: &AstWorld<'_>, root: NodeId) -> Value {
-    run_program_with_output(world, root, &mut std::io::stdout())
+pub fn run(world: &AstWorld<'_>, graph: &ModuleGraph) -> Value {
+    run_with_output(world, graph, &mut std::io::stdout())
 }
 
 // ---------------------------------------------------------------------------
@@ -168,14 +170,18 @@ fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env<'_>) -> Flow {
         NodeKind::LetStmt { name, init, .. } => eval_let(world, env, name, init),
         NodeKind::AssignStmt { target, value } => eval_assign(world, env, target, value),
         NodeKind::ReturnStmt(opt) => eval_return(world, env, opt),
-        NodeKind::IfStmt { cond, then_block, else_block } => {
-            eval_if(world, env, cond, then_block, else_block)
-        }
+        NodeKind::IfStmt {
+            cond,
+            then_block,
+            else_block,
+        } => eval_if(world, env, cond, then_block, else_block),
         NodeKind::WhileStmt { cond, body } => eval_while(world, env, cond, body),
         NodeKind::Block(_) => eval_block(world, id, env),
         NodeKind::Program(_)
         | NodeKind::FnDecl { .. }
         | NodeKind::Param { .. }
+        | NodeKind::Path { .. }
+        | NodeKind::UseDecl { .. }
         | NodeKind::TypeName(_) => {
             panic!("cannot evaluate {:?} directly", world.kind(id))
         }
@@ -214,10 +220,11 @@ fn eval_call(
     callee: NodeId,
     args: &[NodeId],
 ) -> Flow {
-    let fn_name = match world.kind(callee) {
-        NodeKind::Ident(name) => *name,
-        _ => panic!("callee must be an identifier"),
-    };
+    // R4: callee is always a Path; semantic stored target FnDecl in world.resolved,
+    // and the mangled name lives in world.mangled_names. Interpreter looks up
+    // the same mangled name in env.fns.
+    let target_fn = world.resolved[callee];
+    let mangled = &world.mangled_names[target_fn];
 
     let arg_vals: Vec<Value> = args
         .iter()
@@ -226,8 +233,8 @@ fn eval_call(
 
     let (param_ids, body) = env
         .fns
-        .get(fn_name)
-        .unwrap_or_else(|| panic!("undefined function: {fn_name}"))
+        .get(mangled)
+        .unwrap_or_else(|| panic!("undefined function: {mangled}"))
         .clone();
 
     env.push_scope();
@@ -243,7 +250,6 @@ fn eval_call(
 }
 
 /// Evaluate a call to a language built-in.
-/// Each variant matches on the `Builtin` enum — no string comparisons.
 fn eval_builtin_call(
     world: &AstWorld<'_>,
     env: &mut Env<'_>,
@@ -269,12 +275,7 @@ fn eval_builtin_call(
     }
 }
 
-fn eval_let(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
-    name: &str,
-    init: Option<NodeId>,
-) -> Flow {
+fn eval_let(world: &AstWorld<'_>, env: &mut Env<'_>, name: &str, init: Option<NodeId>) -> Flow {
     let val = match init {
         Some(init_id) => eval(world, init_id, env).into_value(),
         None => Value::Unit,
@@ -283,12 +284,7 @@ fn eval_let(
     Flow::Val(Value::Unit)
 }
 
-fn eval_assign(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
-    target: NodeId,
-    value: NodeId,
-) -> Flow {
+fn eval_assign(world: &AstWorld<'_>, env: &mut Env<'_>, target: NodeId, value: NodeId) -> Flow {
     let name = match world.kind(target) {
         NodeKind::Ident(n) => *n,
         _ => panic!("assignment target must be an identifier"),
@@ -298,11 +294,7 @@ fn eval_assign(
     Flow::Val(Value::Unit)
 }
 
-fn eval_return(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
-    opt: Option<NodeId>,
-) -> Flow {
+fn eval_return(world: &AstWorld<'_>, env: &mut Env<'_>, opt: Option<NodeId>) -> Flow {
     let val = match opt {
         Some(expr) => eval(world, expr, env).into_value(),
         None => Value::Unit,
@@ -328,12 +320,7 @@ fn eval_if(
     }
 }
 
-fn eval_while(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
-    cond: NodeId,
-    body: NodeId,
-) -> Flow {
+fn eval_while(world: &AstWorld<'_>, env: &mut Env<'_>, cond: NodeId, body: NodeId) -> Flow {
     loop {
         let cond_val = eval(world, cond, env).into_value();
         match cond_val {
