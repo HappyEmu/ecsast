@@ -1,0 +1,3 @@
+[submodule "zed-ecsast/tree-sitter-ecsast"]
+	path = zed-ecsast/tree-sitter-ecsast
+	url = git@github.com:HappyEmu/tree-sitter-ecsast.git

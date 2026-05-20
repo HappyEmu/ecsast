@@ -3,3 +3,4 @@
 stress/*
 !stress/*.py
 !stress/*.ecs
+zed-ecsast/grammars/
