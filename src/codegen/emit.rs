@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
+use slotmap::SecondaryMap;
+
 use cranelift_codegen::Context;
 use cranelift_codegen::inline::{Inline, InlineCommand};
 use cranelift_codegen::ir::{
@@ -19,7 +21,7 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 use target_lexicon::Triple;
 
-use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind};
+use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind, TypeInfo};
 use crate::codegen::OptLevel;
 use crate::codegen::runtime::{RuntimeFn, declare_runtime};
 use crate::modules::ModuleGraph;
@@ -78,21 +80,21 @@ pub struct Compiler<'a, 'arena> {
     world: &'a AstWorld<'arena>,
     module: ObjectModule,
     runtime_ids: HashMap<RuntimeFn, FuncId>,
-    user_funcs: HashMap<String, UserFunc>,
+    user_funcs: HashMap<&'arena str, UserFunc>,
     string_data: HashMap<String, (DataId, usize)>,
-    inline_funcs: HashSet<String>,
+    inline_funcs: HashSet<&'arena str>,
     inline_bodies: HashMap<FuncId, Function>,
 }
 
-struct BuildCtx<'a> {
+struct BuildCtx<'a, 'arena> {
     builder: FunctionBuilder<'a>,
     vars: HashMap<String, VarStorage>,
     runtime: HashMap<RuntimeFn, FuncRef>,
-    func_refs: HashMap<String, FuncRef>,
+    func_refs: HashMap<&'arena str, FuncRef>,
     return_type: Option<ValType>,
 }
 
-impl BuildCtx<'_> {
+impl BuildCtx<'_, '_> {
     /// Define both variables of a string (ptr, len) pair.
     fn def_str_vars(&mut self, ptr_var: Variable, len_var: Variable, ptr: Value, len: Value) {
         self.builder.def_var(ptr_var, ptr);
@@ -132,13 +134,20 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         })
     }
 
-    fn resolve_type_name(&self, ty_id: NodeId) -> ValType {
-        match self.world.kind(ty_id) {
-            NodeKind::TypeName("int") => ValType::I64,
-            NodeKind::TypeName("float") => ValType::Float,
-            NodeKind::TypeName("bool") => ValType::Bool,
-            NodeKind::TypeName("str") => ValType::Str,
-            other => panic!("unsupported type: {other:?}"),
+    /// Read the `TypeInfo` populated by the semantic pass for `node` and
+    /// project it to the Cranelift-facing `ValType`.
+    fn valtype_of(&self, node: NodeId) -> ValType {
+        let ty = self
+            .world
+            .types
+            .get(node)
+            .unwrap_or_else(|| panic!("missing TypeInfo for node {node:?}"));
+        match ty {
+            TypeInfo::Int => ValType::I64,
+            TypeInfo::Float => ValType::Float,
+            TypeInfo::Bool => ValType::Bool,
+            TypeInfo::Str => ValType::Str,
+            other => panic!("unsupported codegen type: {other:?}"),
         }
     }
 
@@ -164,7 +173,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     continue;
                 };
 
-                let mangled = self.world.mangled_names[id].clone();
+                let mangled: &'arena str = self.world.mangled(id);
                 let is_entry_main = module.id == graph.entry && name == "main";
                 if is_entry_main {
                     continue; // entry-module main is declared by define_main
@@ -177,7 +186,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                         ty: Some(ty_id), ..
                     } = *self.world.kind(param_id)
                     {
-                        let vt = self.resolve_type_name(ty_id);
+                        let vt = self.valtype_of(ty_id);
                         param_types.push(vt);
                         match vt {
                             ValType::Str => {
@@ -192,13 +201,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                 }
                 if let Some(ret_id) = ret_ty {
                     sig.returns.push(AbiParam::new(
-                        self.resolve_type_name(ret_id).as_cranelift_type(),
+                        self.valtype_of(ret_id).as_cranelift_type(),
                     ));
                 }
-                let func_id = self.module.declare_function(&mangled, Linkage::Local, &sig)?;
-                let ret_vt = ret_ty.map(|id| self.resolve_type_name(id));
+                let func_id = self.module.declare_function(mangled, Linkage::Local, &sig)?;
+                let ret_vt = ret_ty.map(|id| self.valtype_of(id));
                 self.user_funcs.insert(
-                    mangled.clone(),
+                    mangled,
                     UserFunc {
                         id: func_id,
                         return_type: ret_vt,
@@ -241,32 +250,31 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         // Pass 1: declare every user function across every module.
         self.declare_functions(graph)?;
 
-        // Pass 2: define each function body. Entry-module `main` is special.
+        // Pass 2: define helpers in callee-before-caller order, then `main`
+        // last. The Cranelift inliner can only inline a callee whose body has
+        // already been saved into `inline_bodies`; topo order guarantees every
+        // inline-marked function is available at every call site that calls it.
+        // (Recursive cycles break the property for back-edges, but a recursive
+        // inline function can't be fully inlined into itself anyway.)
+        let (helpers, main_body) = topo_order_helpers(self.world, graph);
+
         let mut func_ctx = FunctionBuilderContext::new();
-        for module in &graph.modules {
-            let items = match *self.world.kind(module.root) {
-                NodeKind::Program(items) => items,
-                _ => continue,
+        for id in helpers {
+            let NodeKind::FnDecl {
+                params,
+                ret_ty,
+                body,
+                ..
+            } = *self.world.kind(id)
+            else {
+                continue;
             };
-            let is_entry = module.id == graph.entry;
-            for &id in items {
-                let NodeKind::FnDecl {
-                    name,
-                    params,
-                    ret_ty,
-                    body,
-                    ..
-                } = *self.world.kind(id)
-                else {
-                    continue;
-                };
-                if is_entry && name == "main" {
-                    self.define_main(body, &mut func_ctx)?;
-                } else {
-                    let mangled = self.world.mangled_names[id].clone();
-                    self.define_user_func(&mangled, params, ret_ty, body, &mut func_ctx)?;
-                }
-            }
+            let mangled: &'arena str = self.world.mangled(id);
+            self.define_user_func(mangled, params, ret_ty, body, &mut func_ctx)?;
+        }
+
+        if let Some(body) = main_body {
+            self.define_main(body, &mut func_ctx)?;
         }
 
         Ok(self.module.finish())
@@ -331,13 +339,13 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
     fn define_user_func(
         &mut self,
-        name: &str,
+        name: &'arena str,
         params: &[NodeId],
         ret_ty: Option<NodeId>,
         body: NodeId,
         func_ctx: &mut FunctionBuilderContext,
     ) -> Result<(), Box<dyn Error>> {
-        let func_id = self.user_funcs[name].id;
+        let func_id = self.user_funcs[&name].id;
         let sig = self
             .module
             .declarations()
@@ -347,7 +355,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
         let mut func = Function::with_name_signature(UserFuncName::default(), sig.clone());
         {
-            let return_type = ret_ty.map(|id| self.resolve_type_name(id));
+            let return_type = ret_ty.map(|id| self.valtype_of(id));
             let mut ctx = self.make_build_ctx(&mut func, func_ctx, return_type);
             let entry = ctx.builder.create_block();
             ctx.builder.append_block_params_for_function_params(entry);
@@ -363,7 +371,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                     ty: Some(ty_id),
                 } = *self.world.kind(param_id)
                 {
-                    let vt = self.resolve_type_name(ty_id);
+                    let vt = self.valtype_of(ty_id);
                     match vt {
                         ValType::Str => {
                             let (ptr_var, len_var) = self.declare_str_vars(&mut ctx);
@@ -400,7 +408,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             ctx.builder.finalize();
         }
 
-        let is_inline = self.inline_funcs.contains(name);
+        let is_inline = self.inline_funcs.contains(&name);
         if is_inline {
             self.inline_bodies.insert(func_id, func.clone());
         }
@@ -421,7 +429,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     /// Allocate stack-backed out-parameter slots for a (ptr, len) string pair.
     /// Returns `(ptr_addr, len_addr, ptr_slot, len_slot)` — pass the addresses to
     /// a C function, then `stack_load` from the slots to read back the values.
-    fn create_str_out_slots(&self, ctx: &mut BuildCtx) -> (Value, Value, StackSlot, StackSlot) {
+    fn create_str_out_slots(&self, ctx: &mut BuildCtx<'_, '_>) -> (Value, Value, StackSlot, StackSlot) {
         let ptr_type = self.module.target_config().pointer_type();
 
         let ptr_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
@@ -443,7 +451,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     }
 
     /// Declare a fresh (ptr, len) variable pair for a string value.
-    fn declare_str_vars(&self, ctx: &mut BuildCtx) -> (Variable, Variable) {
+    fn declare_str_vars(&self, ctx: &mut BuildCtx<'_, '_>) -> (Variable, Variable) {
         let ptr_type = self.module.target_config().pointer_type();
 
         let ptr_var = ctx.builder.declare_var(ptr_type);
@@ -457,7 +465,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         func: &'b mut Function,
         func_ctx: &'b mut FunctionBuilderContext,
         return_type: Option<ValType>,
-    ) -> BuildCtx<'b> {
+    ) -> BuildCtx<'b, 'arena> {
         let builder = FunctionBuilder::new(func, func_ctx);
         let runtime = self
             .runtime_ids
@@ -466,9 +474,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
             .collect();
 
         let mut func_refs = HashMap::new();
-        for (name, uf) in &self.user_funcs {
+        for (&name, uf) in &self.user_funcs {
             let fref = self.module.declare_func_in_func(uf.id, builder.func);
-            func_refs.insert(name.clone(), fref);
+            func_refs.insert(name, fref);
         }
 
         BuildCtx {
@@ -481,7 +489,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     }
 
     /// Compile a block. Returns true if the block is terminated (ends with return).
-    fn compile_block(&mut self, block_id: NodeId, ctx: &mut BuildCtx) -> bool {
+    fn compile_block(&mut self, block_id: NodeId, ctx: &mut BuildCtx<'_, '_>) -> bool {
         let stmts = match self.world.kind(block_id) {
             NodeKind::Block(stmts) => *stmts,
             _ => panic!("expected Block node"),
@@ -498,9 +506,9 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
     }
 
     /// Compile a statement. Returns true if the current block is terminated.
-    fn compile_stmt(&mut self, id: NodeId, ctx: &mut BuildCtx) -> bool {
+    fn compile_stmt(&mut self, id: NodeId, ctx: &mut BuildCtx<'_, '_>) -> bool {
         match *self.world.kind(id) {
-            NodeKind::LetStmt { name, ty, init } => self.compile_let_stmt(name, ty, init, ctx),
+            NodeKind::LetStmt { name, init, .. } => self.compile_let_stmt(id, name, init, ctx),
             NodeKind::AssignStmt { target, value } => self.compile_assign_stmt(target, value, ctx),
             NodeKind::ReturnStmt(expr) => self.compile_return_stmt(expr, ctx),
             NodeKind::IfStmt {
@@ -523,14 +531,14 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
 
     fn compile_let_stmt(
         &mut self,
+        id: NodeId,
         name: &str,
-        ty: Option<NodeId>,
         init: Option<NodeId>,
-        ctx: &mut BuildCtx,
+        ctx: &mut BuildCtx<'_, '_>,
     ) -> bool {
-        let vt = ty
-            .map(|t| self.resolve_type_name(t))
-            .unwrap_or(ValType::I64);
+        // The semantic pass writes the variable's final type onto the LetStmt
+        // node itself (annotation, inferred from init, or both reconciled).
+        let vt = self.valtype_of(id);
 
         match vt {
             ValType::Str => {
@@ -563,7 +571,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         false
     }
 
-    fn compile_assign_stmt(&mut self, target: NodeId, value: NodeId, ctx: &mut BuildCtx) -> bool {
+    fn compile_assign_stmt(&mut self, target: NodeId, value: NodeId, ctx: &mut BuildCtx<'_, '_>) -> bool {
         let name = match self.world.kind(target) {
             NodeKind::Ident(n) => *n,
             _ => panic!("assign target must be ident"),
@@ -594,7 +602,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         false
     }
 
-    fn compile_return_stmt(&mut self, expr: Option<NodeId>, ctx: &mut BuildCtx) -> bool {
+    fn compile_return_stmt(&mut self, expr: Option<NodeId>, ctx: &mut BuildCtx<'_, '_>) -> bool {
         if let Some(expr_id) = expr {
             let (val, val_ty) = self.compile_expr(expr_id, ctx).into_scalar();
             if let Some(ret_ty) = ctx.return_type {
@@ -614,7 +622,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         cond: NodeId,
         then_block: NodeId,
         else_block: Option<NodeId>,
-        ctx: &mut BuildCtx,
+        ctx: &mut BuildCtx<'_, '_>,
     ) -> bool {
         let (cond_val, cond_ty) = self.compile_expr(cond, ctx).into_scalar();
         let cond_i8 = self.coerce(cond_val, cond_ty, ValType::Bool, ctx);
@@ -658,7 +666,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
     }
 
-    fn compile_while_stmt(&mut self, cond: NodeId, body: NodeId, ctx: &mut BuildCtx) -> bool {
+    fn compile_while_stmt(&mut self, cond: NodeId, body: NodeId, ctx: &mut BuildCtx<'_, '_>) -> bool {
         let header_bb = ctx.builder.create_block();
         let body_bb = ctx.builder.create_block();
         let exit_bb = ctx.builder.create_block();
@@ -695,22 +703,23 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         &mut self,
         callee: NodeId,
         args: &[NodeId],
-        ctx: &mut BuildCtx,
+        ctx: &mut BuildCtx<'_, '_>,
     ) -> Option<ExprResult> {
         let target_fn = self.world.resolved[callee];
-        let mangled = self.world.mangled_names[target_fn].clone();
+        let mangled: &'arena str = self.world.mangled(target_fn);
         let fref = *ctx
             .func_refs
             .get(&mangled)
             .unwrap_or_else(|| panic!("undeclared function: {mangled}"));
-        let uf = &self.user_funcs[&mangled];
-        let param_types = uf.param_types.clone();
-        let return_type = uf.return_type;
+        let return_type = self.user_funcs[&mangled].return_type;
 
+        // `ValType` is `Copy`, so we look the expected type back up per arg
+        // rather than cloning `param_types` upfront. The lookup table is the
+        // same `&'arena str`-keyed map throughout, so this is a single hash.
         let mut arg_vals = Vec::new();
         for (i, &arg_id) in args.iter().enumerate() {
             let result = self.compile_expr(arg_id, ctx);
-            let expected_ty = param_types.get(i).copied();
+            let expected_ty = self.user_funcs[&mangled].param_types.get(i).copied();
             match (result, expected_ty) {
                 (ExprResult::Str { ptr, len }, _) => {
                     arg_vals.push(ptr);
@@ -739,7 +748,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         &mut self,
         builtin: Builtin,
         args: &[NodeId],
-        ctx: &mut BuildCtx,
+        ctx: &mut BuildCtx<'_, '_>,
     ) -> Option<ExprResult> {
         match builtin {
             Builtin::Print => {
@@ -751,18 +760,24 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
                             .ins()
                             .call(ctx.runtime[&RuntimeFn::PrintStr], &[ptr, len]);
                     }
-                    ExprResult::Scalar(val, val_ty) => {
-                        if val_ty == ValType::Float {
+                    ExprResult::Scalar(val, val_ty) => match val_ty {
+                        ValType::Float => {
                             ctx.builder
                                 .ins()
                                 .call(ctx.runtime[&RuntimeFn::PrintFloat], &[val]);
-                        } else {
+                        }
+                        ValType::Bool => {
+                            ctx.builder
+                                .ins()
+                                .call(ctx.runtime[&RuntimeFn::PrintBool], &[val]);
+                        }
+                        _ => {
                             let int_val = self.coerce(val, val_ty, ValType::I64, ctx);
                             ctx.builder
                                 .ins()
                                 .call(ctx.runtime[&RuntimeFn::PrintInt], &[int_val]);
                         }
-                    }
+                    },
                 }
                 None
             }
@@ -798,7 +813,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
     }
 
-    fn compile_expr(&mut self, id: NodeId, ctx: &mut BuildCtx) -> ExprResult {
+    fn compile_expr(&mut self, id: NodeId, ctx: &mut BuildCtx<'_, '_>) -> ExprResult {
         match *self.world.kind(id) {
             NodeKind::IntLit(n) => self.compile_int_lit(n, ctx),
             NodeKind::FloatLit(f) => self.compile_float_lit(f, ctx),
@@ -817,22 +832,22 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
     }
 
-    fn compile_int_lit(&self, n: i64, ctx: &mut BuildCtx) -> ExprResult {
+    fn compile_int_lit(&self, n: i64, ctx: &mut BuildCtx<'_, '_>) -> ExprResult {
         let val = ctx.builder.ins().iconst(types::I64, n);
         ExprResult::Scalar(val, ValType::I64)
     }
 
-    fn compile_float_lit(&self, f: f64, ctx: &mut BuildCtx) -> ExprResult {
+    fn compile_float_lit(&self, f: f64, ctx: &mut BuildCtx<'_, '_>) -> ExprResult {
         let val = ctx.builder.ins().f64const(f);
         ExprResult::Scalar(val, ValType::Float)
     }
 
-    fn compile_bool_lit(&self, b: bool, ctx: &mut BuildCtx) -> ExprResult {
+    fn compile_bool_lit(&self, b: bool, ctx: &mut BuildCtx<'_, '_>) -> ExprResult {
         let val = ctx.builder.ins().iconst(types::I8, b as i64);
         ExprResult::Scalar(val, ValType::Bool)
     }
 
-    fn compile_string_lit(&mut self, s: &str, ctx: &mut BuildCtx) -> ExprResult {
+    fn compile_string_lit(&mut self, s: &str, ctx: &mut BuildCtx<'_, '_>) -> ExprResult {
         let (data_id, len) = self.get_or_create_string_data(s);
         let gv = self.module.declare_data_in_func(data_id, ctx.builder.func);
         let ptr = ctx
@@ -843,7 +858,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         ExprResult::Str { ptr, len: len_val }
     }
 
-    fn compile_ident(&self, name: &str, ctx: &mut BuildCtx) -> ExprResult {
+    fn compile_ident(&self, name: &str, ctx: &mut BuildCtx<'_, '_>) -> ExprResult {
         match &ctx.vars[name] {
             VarStorage::Scalar(var, vt) => {
                 let val = ctx.builder.use_var(*var);
@@ -862,7 +877,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         op: BinOp,
         lhs: NodeId,
         rhs: NodeId,
-        ctx: &mut BuildCtx,
+        ctx: &mut BuildCtx<'_, '_>,
     ) -> ExprResult {
         let (l, l_ty) = self.compile_expr(lhs, ctx).into_scalar();
         let (r, r_ty) = self.compile_expr(rhs, ctx).into_scalar();
@@ -979,7 +994,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         &mut self,
         op: crate::ast::UnaryOp,
         operand: NodeId,
-        ctx: &mut BuildCtx,
+        ctx: &mut BuildCtx<'_, '_>,
     ) -> ExprResult {
         let (val, vt) = self.compile_expr(operand, ctx).into_scalar();
         match op {
@@ -1007,7 +1022,7 @@ impl<'a, 'arena> Compiler<'a, 'arena> {
         }
     }
 
-    fn coerce(&self, val: Value, from: ValType, to: ValType, ctx: &mut BuildCtx) -> Value {
+    fn coerce(&self, val: Value, from: ValType, to: ValType, ctx: &mut BuildCtx<'_, '_>) -> Value {
         if from == to {
             return val;
         }
@@ -1026,6 +1041,138 @@ impl OptLevel {
             OptLevel::Speed => "speed",
             OptLevel::SpeedAndSize => "speed_and_size",
         }
+    }
+}
+
+/// Order all non-main FnDecls callee-before-caller via DFS postorder over the
+/// call graph (built from `world.resolved`). Recursive back-edges are skipped:
+/// a function on the current DFS stack can't be ordered before itself, and
+/// recursive inline calls can't be fully inlined anyway. Returns the helper
+/// order plus the entry-module `main` body, which the caller emits last.
+fn topo_order_helpers(
+    world: &AstWorld<'_>,
+    graph: &ModuleGraph,
+) -> (Vec<NodeId>, Option<NodeId>) {
+    let mut helpers: Vec<NodeId> = Vec::new();
+    let mut main_body: Option<NodeId> = None;
+    let mut helper_set: SecondaryMap<NodeId, ()> = SecondaryMap::new();
+
+    for module in &graph.modules {
+        let NodeKind::Program(items) = *world.kind(module.root) else {
+            continue;
+        };
+        let is_entry = module.id == graph.entry;
+        for &id in items {
+            let NodeKind::FnDecl { name, body, .. } = *world.kind(id) else {
+                continue;
+            };
+            if is_entry && name == "main" {
+                main_body = Some(body);
+            } else {
+                helpers.push(id);
+                helper_set.insert(id, ());
+            }
+        }
+    }
+
+    let mut visited: SecondaryMap<NodeId, ()> = SecondaryMap::new();
+    let mut on_stack: SecondaryMap<NodeId, ()> = SecondaryMap::new();
+    let mut order: Vec<NodeId> = Vec::with_capacity(helpers.len());
+    for &id in &helpers {
+        topo_dfs(world, id, &helper_set, &mut visited, &mut on_stack, &mut order);
+    }
+
+    (order, main_body)
+}
+
+fn topo_dfs(
+    world: &AstWorld<'_>,
+    node: NodeId,
+    helper_set: &SecondaryMap<NodeId, ()>,
+    visited: &mut SecondaryMap<NodeId, ()>,
+    on_stack: &mut SecondaryMap<NodeId, ()>,
+    order: &mut Vec<NodeId>,
+) {
+    if visited.contains_key(node) || on_stack.contains_key(node) {
+        return;
+    }
+    on_stack.insert(node, ());
+    let NodeKind::FnDecl { body, .. } = *world.kind(node) else {
+        on_stack.remove(node);
+        visited.insert(node, ());
+        order.push(node);
+        return;
+    };
+    visit_callees(world, body, helper_set, &mut |callee| {
+        topo_dfs(world, callee, helper_set, visited, on_stack, order);
+    });
+    on_stack.remove(node);
+    visited.insert(node, ());
+    order.push(node);
+}
+
+/// Walk a subtree and invoke `visit` for each resolved call target that is in
+/// `helper_set`. Folded into the topo walk so we don't materialize a callees
+/// table up-front.
+fn visit_callees(
+    world: &AstWorld<'_>,
+    id: NodeId,
+    helper_set: &SecondaryMap<NodeId, ()>,
+    visit: &mut impl FnMut(NodeId),
+) {
+    match *world.kind(id) {
+        NodeKind::Call { callee, args } => {
+            if let Some(&target) = world.resolved.get(callee)
+                && helper_set.contains_key(target)
+            {
+                visit(target);
+            }
+            for &a in args {
+                visit_callees(world, a, helper_set, visit);
+            }
+        }
+        NodeKind::BuiltinCall { args, .. } => {
+            for &a in args {
+                visit_callees(world, a, helper_set, visit);
+            }
+        }
+        NodeKind::Block(stmts) => {
+            for &s in stmts {
+                visit_callees(world, s, helper_set, visit);
+            }
+        }
+        NodeKind::IfStmt {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            visit_callees(world, cond, helper_set, visit);
+            visit_callees(world, then_block, helper_set, visit);
+            if let Some(eb) = else_block {
+                visit_callees(world, eb, helper_set, visit);
+            }
+        }
+        NodeKind::WhileStmt { cond, body } => {
+            visit_callees(world, cond, helper_set, visit);
+            visit_callees(world, body, helper_set, visit);
+        }
+        NodeKind::LetStmt { init: Some(init), .. } => {
+            visit_callees(world, init, helper_set, visit);
+        }
+        NodeKind::AssignStmt { value, .. } => {
+            visit_callees(world, value, helper_set, visit);
+        }
+        NodeKind::ReturnStmt(Some(v)) => {
+            visit_callees(world, v, helper_set, visit);
+        }
+        NodeKind::BinOp { lhs, rhs, .. } => {
+            visit_callees(world, lhs, helper_set, visit);
+            visit_callees(world, rhs, helper_set, visit);
+        }
+        NodeKind::UnaryOp { operand, .. } => {
+            visit_callees(world, operand, helper_set, visit);
+        }
+        _ => {}
     }
 }
 

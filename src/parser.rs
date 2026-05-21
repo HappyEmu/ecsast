@@ -14,7 +14,7 @@ use crate::span::Span;
 // ---------------------------------------------------------------------------
 
 pub struct Parser<'src, 'arena, 'w> {
-    tokens: &'src [Token],
+    tokens: &'src [Token<'src>],
     pos: usize,
     arena: &'arena Bump,
     pub world: &'w mut AstWorld<'arena>,
@@ -26,7 +26,7 @@ pub struct Parser<'src, 'arena, 'w> {
 
 /// Binding power (precedence) for binary operators.
 /// Returns `(left_bp, right_bp)` — right_bp > left_bp means right-associative.
-fn infix_bp(kind: &TokenKind) -> Option<(u8, u8)> {
+fn infix_bp(kind: &TokenKind<'_>) -> Option<(u8, u8)> {
     let bp = match kind {
         TokenKind::PipePipe => (1, 2),                 // ||
         TokenKind::AmpAmp => (3, 4),                   // &&
@@ -44,7 +44,7 @@ fn infix_bp(kind: &TokenKind) -> Option<(u8, u8)> {
     Some(bp)
 }
 
-fn token_to_binop(kind: &TokenKind) -> BinOp {
+fn token_to_binop(kind: &TokenKind<'_>) -> BinOp {
     match kind {
         TokenKind::Plus => BinOp::Add,
         TokenKind::Minus => BinOp::Sub,
@@ -75,7 +75,7 @@ fn token_to_binop(kind: &TokenKind) -> BinOp {
 
 impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
     pub fn new(
-        tokens: &'src [Token],
+        tokens: &'src [Token<'src>],
         arena: &'arena Bump,
         world: &'w mut AstWorld<'arena>,
     ) -> Self {
@@ -87,16 +87,16 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
         }
     }
 
-    fn peek(&self) -> &TokenKind {
+    fn peek(&self) -> &TokenKind<'src> {
         &self.tokens[self.pos].kind
     }
 
-    fn peek_token(&self) -> &Token {
+    fn peek_token(&self) -> &Token<'src> {
         &self.tokens[self.pos]
     }
 
     /// Consume the current token and return a clone of it.
-    fn advance(&mut self) -> Token {
+    fn advance(&mut self) -> Token<'src> {
         let tok = self.tokens[self.pos].clone();
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
@@ -105,7 +105,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
     }
 
     /// Advance only if the current token matches `expected` (by discriminant).
-    fn eat(&mut self, expected: &TokenKind) -> bool {
+    fn eat(&mut self, expected: &TokenKind<'_>) -> bool {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(expected) {
             self.advance();
             true
@@ -115,7 +115,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
     }
 
     /// Advance and return the token, panicking if the discriminant doesn't match.
-    fn expect(&mut self, expected: &TokenKind) -> Token {
+    fn expect(&mut self, expected: &TokenKind<'_>) -> Token<'src> {
         if std::mem::discriminant(self.peek()) != std::mem::discriminant(expected) {
             panic!(
                 "expected {:?} but got {:?} at span {:?}",
@@ -127,7 +127,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
         self.advance()
     }
 
-    fn at(&self, kind: &TokenKind) -> bool {
+    fn at(&self, kind: &TokenKind<'_>) -> bool {
         std::mem::discriminant(self.peek()) == std::mem::discriminant(kind)
     }
 
@@ -195,31 +195,40 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
         let start = self.start_span();
         self.expect(&TokenKind::Use);
 
-        let mut segments: Vec<&'arena str> = Vec::new();
         let first = self.advance();
-        match first.kind {
-            TokenKind::Ident(s) => segments.push(self.arena.alloc_str(&s)),
+        let head = match first.kind {
+            TokenKind::Ident(s) => self.arena.alloc_str(s),
             other => panic!("expected ident after `use`, got {:?}", other),
-        }
+        };
+        let segments = self.continue_path_segments(head, true);
+        let end = self.peek_token().span.end;
+        self.expect(&TokenKind::Semicolon);
+        self.world
+            .alloc(NodeKind::UseDecl { path: segments }, Span::new(start, end))
+    }
+
+    /// Continue parsing `::`-separated path segments after consuming `head`.
+    /// When `allow_glob` is true, a trailing `::*` terminates the path (the
+    /// `*` segment is left in the slice for the semantic pass to reject).
+    fn continue_path_segments(
+        &mut self,
+        head: &'arena str,
+        allow_glob: bool,
+    ) -> &'arena [&'arena str] {
+        let mut segments: Vec<&'arena str> = vec![head];
         while self.eat(&TokenKind::ColonColon) {
-            // A trailing `*` is left in the path so the semantic pass can emit
-            // a precise "glob imports not supported" error.
-            if self.at(&TokenKind::Star) {
+            if allow_glob && self.at(&TokenKind::Star) {
                 self.advance();
                 segments.push("*");
                 break;
             }
             let next = self.advance();
             match next.kind {
-                TokenKind::Ident(s) => segments.push(self.arena.alloc_str(&s)),
+                TokenKind::Ident(s) => segments.push(self.arena.alloc_str(s)),
                 other => panic!("expected ident after `::`, got {:?}", other),
             }
         }
-        let end = self.peek_token().span.end;
-        self.expect(&TokenKind::Semicolon);
-        let path = self.arena.alloc_slice_copy(&segments);
-        self.world
-            .alloc(NodeKind::UseDecl { path }, Span::new(start, end))
+        self.arena.alloc_slice_copy(&segments)
     }
 
     // ---- Function declaration -----------------------------------------------
@@ -229,7 +238,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
         self.expect(&TokenKind::Fn);
 
         let name = match self.advance().kind {
-            TokenKind::Ident(s) => self.arena.alloc_str(&s),
+            TokenKind::Ident(s) => self.arena.alloc_str(s),
             other => panic!("expected function name, got {:?}", other),
         };
 
@@ -267,7 +276,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
     fn parse_param(&mut self) -> NodeId {
         let start = self.start_span();
         let name = match self.advance().kind {
-            TokenKind::Ident(s) => self.arena.alloc_str(&s),
+            TokenKind::Ident(s) => self.arena.alloc_str(s),
             other => panic!("expected parameter name, got {:?}", other),
         };
         let ty = if self.eat(&TokenKind::Colon) {
@@ -285,7 +294,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
         match tok.kind {
             TokenKind::Ident(name) => self
                 .world
-                .alloc(NodeKind::TypeName(self.arena.alloc_str(&name)), tok.span),
+                .alloc(NodeKind::TypeName(self.arena.alloc_str(name)), tok.span),
             other => panic!("expected type name, got {:?}", other),
         }
     }
@@ -322,7 +331,7 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
         self.expect(&TokenKind::Let);
 
         let name = match self.advance().kind {
-            TokenKind::Ident(s) => self.arena.alloc_str(&s),
+            TokenKind::Ident(s) => self.arena.alloc_str(s),
             other => panic!("expected name after `let`, got {:?}", other),
         };
 
@@ -521,69 +530,43 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
     fn parse_postfix(&mut self) -> NodeId {
         let mut expr = self.parse_primary();
 
-        loop {
-            if self.at(&TokenKind::LParen) {
-                let start = self.start_of(expr);
-                self.advance(); // `(`
-                let mut args = Vec::new();
-                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
-                    args.push(self.parse_expr());
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
+        while self.at(&TokenKind::LParen) {
+            let start = self.start_of(expr);
+            self.advance(); // `(`
+            let mut args = Vec::new();
+            while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                args.push(self.parse_expr());
+                if !self.eat(&TokenKind::Comma) {
+                    break;
                 }
-                let end = self.peek_token().span.end;
-                self.expect(&TokenKind::RParen);
-                let args_slice = self.arena.alloc_slice_copy(&args);
-
-                // R3: every Call.callee is a Path. Bare `name(...)` calls
-                // get a one-segment Path so downstream lookup has a single
-                // shape. Built-in names short-circuit to BuiltinCall, which
-                // has no callee field at all.
-                expr = match *self.world.kind(expr) {
-                    NodeKind::Ident(name) => {
-                        if let Some(builtin) = Builtin::from_name(name) {
-                            self.world.alloc(
-                                NodeKind::BuiltinCall {
-                                    builtin,
-                                    args: args_slice,
-                                },
-                                Span::new(start, end),
-                            )
-                        } else {
-                            let seg_slice: &[&str] = self.arena.alloc_slice_copy(&[name]);
-                            let ident_span = self.world.span(expr);
-                            let path = self.world.alloc(
-                                NodeKind::Path { segments: seg_slice },
-                                ident_span,
-                            );
-                            self.world.alloc(
-                                NodeKind::Call {
-                                    callee: path,
-                                    args: args_slice,
-                                },
-                                Span::new(start, end),
-                            )
-                        }
-                    }
-                    NodeKind::Path { .. } => self.world.alloc(
-                        NodeKind::Call {
-                            callee: expr,
-                            args: args_slice,
-                        },
-                        Span::new(start, end),
-                    ),
-                    _ => self.world.alloc(
-                        NodeKind::Call {
-                            callee: expr,
-                            args: args_slice,
-                        },
-                        Span::new(start, end),
-                    ),
-                };
-            } else {
-                break;
             }
+            let end = self.peek_token().span.end;
+            self.expect(&TokenKind::RParen);
+            let args_slice = self.arena.alloc_slice_copy(&args);
+            let span = Span::new(start, end);
+
+            // R3: every Call.callee is a Path. Bare `name(...)` gets a
+            // one-segment Path so downstream lookup has a single shape.
+            // Built-in names short-circuit to BuiltinCall.
+            expr = if let NodeKind::Ident(name) = *self.world.kind(expr) {
+                if let Some(builtin) = Builtin::from_name(name) {
+                    self.world.alloc(
+                        NodeKind::BuiltinCall { builtin, args: args_slice },
+                        span,
+                    )
+                } else {
+                    let segs: &[&str] = self.arena.alloc_slice_copy(&[name]);
+                    let path = self.world.alloc(
+                        NodeKind::Path { segments: segs },
+                        self.world.span(expr),
+                    );
+                    self.world
+                        .alloc(NodeKind::Call { callee: path, args: args_slice }, span)
+                }
+            } else {
+                self.world
+                    .alloc(NodeKind::Call { callee: expr, args: args_slice }, span)
+            };
         }
 
         expr
@@ -598,27 +581,20 @@ impl<'src, 'arena, 'w> Parser<'src, 'arena, 'w> {
             TokenKind::Str(s) => self
                 .world
                 .alloc(NodeKind::StringLit(self.arena.alloc_str(&s)), tok.span),
+            // (`s` is a Cow; alloc_str takes &str via deref)
             TokenKind::Ident(name) => {
                 // `foo::bar::baz` → Path. Bare `foo` stays Ident (it may refer
                 // to a local). The wrap-in-Path step for callees happens in
                 // parse_postfix when we see the trailing `(`.
+                let head = self.arena.alloc_str(name);
                 if self.at(&TokenKind::ColonColon) {
                     let start = tok.span.start;
-                    let mut segments: Vec<&'arena str> = vec![self.arena.alloc_str(&name)];
-                    while self.eat(&TokenKind::ColonColon) {
-                        let next = self.advance();
-                        match next.kind {
-                            TokenKind::Ident(s) => segments.push(self.arena.alloc_str(&s)),
-                            other => panic!("expected ident after `::`, got {:?}", other),
-                        }
-                    }
+                    let segs = self.continue_path_segments(head, false);
                     let end = self.tokens[self.pos - 1].span.end;
-                    let segs = self.arena.alloc_slice_copy(&segments);
                     self.world
                         .alloc(NodeKind::Path { segments: segs }, Span::new(start, end))
                 } else {
-                    self.world
-                        .alloc(NodeKind::Ident(self.arena.alloc_str(&name)), tok.span)
+                    self.world.alloc(NodeKind::Ident(head), tok.span)
                 }
             }
             TokenKind::LParen => {
@@ -1526,7 +1502,7 @@ mod tests {
     #[test]
     fn float_literal() {
         let arena = Bump::new();
-        let (world, root) = parse("fn main() { let f: float = 3.14; }", &arena);
+        let (world, root) = parse("fn main() { let f: float = 2.5; }", &arena);
 
         let body = fn_body(&world, first_fn(&world, root));
         let NodeKind::LetStmt {
@@ -1538,7 +1514,7 @@ mod tests {
         let NodeKind::FloatLit(v) = *world.kind(expr) else {
             panic!()
         };
-        assert!((v - 3.14).abs() < 1e-10);
+        assert!((v - 2.5).abs() < 1e-10);
     }
 
     #[test]

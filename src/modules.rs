@@ -3,8 +3,19 @@
 //! Lexes and parses the entry file plus every transitively imported sibling
 //! file into a single shared `AstWorld` and `Bump` arena, building a graph
 //! that the semantic pass and codegen consume.
+//!
+//! Modules are first-class. A `use a::b::c::d;` is resolved by walking the
+//! path through the graph: any prefix that exists as a file is a real
+//! `Module`; intermediate path segments without a backing file act as pure
+//! namespaces, derived from `by_path` keys. The trailing segment binds locally
+//! to either a `Module` (if its full path is loaded) or a `Func` (if the
+//! penultimate path is loaded and the trailing name is a public item).
+//!
+//! The loader has one job: given a `use` path, load the longest prefix that
+//! has a backing file. Whether the trailing segments are items or further
+//! submodules is decided later, by the semantic pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -18,24 +29,39 @@ use crate::span::Span;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ModuleId(pub u32);
 
+/// What a name in a module's scope refers to. Mirrors Rust's `Res::Mod` /
+/// `Res::Def(Fn, ...)` distinction. Populated by the semantic pass from
+/// `use` declarations.
+#[derive(Clone, Copy, Debug)]
+pub enum Binding {
+    Module(ModuleId),
+    Func { node: NodeId, owner: ModuleId },
+}
+
 pub struct Module {
     pub id: ModuleId,
     pub file_path: PathBuf,
     /// Dotted module path, e.g. ["math", "geometry"]. The entry module is `vec![]`.
     pub mod_path: Vec<String>,
     pub root: NodeId,
-    /// Item-imports: `use a::b::c;` → `c` → (module of `a::b`, decl node of `c`).
-    /// Populated by the semantic pass.
-    pub imports: HashMap<String, (ModuleId, NodeId)>,
-    /// Module-aliases: `use math;` → `math` → ModuleId of `math`.
-    /// Populated by the semantic pass.
-    pub module_aliases: HashMap<String, ModuleId>,
+    /// Names brought into local scope by `use` declarations. The trailing
+    /// segment of each use path is the key; the value records whether that
+    /// name refers to a module or a function.
+    pub bindings: HashMap<String, Binding>,
 }
 
 pub struct ModuleGraph {
     pub modules: Vec<Module>,
-    pub by_path: HashMap<Vec<String>, ModuleId>,
+    /// Map from the joined path key (`""` for the entry module, `"math"`,
+    /// `"math::geometry"`, …) to the owning module.
+    pub by_path: HashMap<String, ModuleId>,
+    /// Every joined prefix that names a loaded module *or* an intermediate
+    /// namespace above one. Lets `is_namespace` answer in O(1).
+    pub namespaces: HashSet<String>,
     pub entry: ModuleId,
+    /// Directory the entry file lives in. Used by the loader to resolve
+    /// sibling and nested module files; not consulted by the semantic pass.
+    pub entry_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -81,38 +107,34 @@ impl ModuleGraph {
         let mut graph = ModuleGraph {
             modules: Vec::new(),
             by_path: HashMap::new(),
+            namespaces: HashSet::new(),
             entry: ModuleId(0),
+            entry_dir,
         };
 
         let entry_id = graph.add_module(world, arena, entry_path.to_path_buf(), Vec::new())?;
         graph.entry = entry_id;
 
-        // Worklist: process each module's UseDecls and load missing modules.
-        // In-progress set tracks the current DFS path for cycle detection.
-        let mut visited: Vec<bool> = vec![false; graph.modules.len()];
-        let mut on_stack: Vec<bool> = vec![false; graph.modules.len()];
-
-        // Iterative DFS using explicit stack of (module_id, child_index_to_visit_next).
+        // DFS through transitive `use` declarations, loading whichever file
+        // is the longest existing prefix of each use path.
         struct Frame {
             mod_id: ModuleId,
-            imports: Vec<Vec<String>>, // module paths to load
+            imports: Vec<Vec<String>>,
             idx: usize,
         }
 
-        let mut frames: Vec<Frame> = Vec::new();
-        frames.push(Frame {
+        let mut on_stack: HashSet<ModuleId> = HashSet::new();
+        on_stack.insert(entry_id);
+
+        let mut frames: Vec<Frame> = vec![Frame {
             mod_id: entry_id,
             imports: graph.module_paths_to_load(world, entry_id),
             idx: 0,
-        });
-        on_stack[entry_id.0 as usize] = true;
+        }];
 
         while let Some(frame) = frames.last_mut() {
             if frame.idx >= frame.imports.len() {
-                on_stack[frame.mod_id.0 as usize] = true; // already true, but clarity
-                let mod_id = frame.mod_id;
-                on_stack[mod_id.0 as usize] = false;
-                visited[mod_id.0 as usize] = true;
+                on_stack.remove(&frame.mod_id);
                 frames.pop();
                 continue;
             }
@@ -120,10 +142,9 @@ impl ModuleGraph {
             let mod_path = frame.imports[frame.idx].clone();
             frame.idx += 1;
 
-            // Already loaded?
-            if let Some(&child_id) = graph.by_path.get(&mod_path) {
-                if on_stack[child_id.0 as usize] {
-                    // Cycle: walk current frames to build chain.
+            let key = join_path(&mod_path);
+            if let Some(&child_id) = graph.by_path.get(&key) {
+                if on_stack.contains(&child_id) {
                     let mut chain: Vec<String> = frames
                         .iter()
                         .map(|f| graph.modules[f.mod_id.0 as usize].mod_path_label())
@@ -134,15 +155,10 @@ impl ModuleGraph {
                         None,
                     ));
                 }
-                if !visited[child_id.0 as usize] {
-                    // Already on stack (shouldn't happen since checked above) or DAG re-import.
-                    // For DAG: skip; already loading.
-                }
                 continue;
             }
 
-            // Resolve file path.
-            let file_path = resolve_module_file(&entry_dir, &mod_path);
+            let file_path = resolve_module_file(&graph.entry_dir, &mod_path);
             if !file_path.exists() {
                 return Err(ModuleError::new(
                     format!(
@@ -155,13 +171,7 @@ impl ModuleGraph {
             }
 
             let child_id = graph.add_module(world, arena, file_path, mod_path.clone())?;
-            while visited.len() < graph.modules.len() {
-                visited.push(false);
-            }
-            while on_stack.len() < graph.modules.len() {
-                on_stack.push(false);
-            }
-            on_stack[child_id.0 as usize] = true;
+            on_stack.insert(child_id);
 
             let child_imports = graph.module_paths_to_load(world, child_id);
             frames.push(Frame {
@@ -172,6 +182,17 @@ impl ModuleGraph {
         }
 
         Ok(graph)
+    }
+
+    /// Look up a module by its dotted path segments.
+    pub fn lookup(&self, segments: &[impl AsRef<str>]) -> Option<ModuleId> {
+        self.by_path.get(&join_path(segments)).copied()
+    }
+
+    /// Returns true if `prefix` is the path of a loaded module, or a strict
+    /// prefix of one (i.e. acts as a namespace even without its own file).
+    pub fn is_namespace(&self, prefix: &[impl AsRef<str>]) -> bool {
+        self.namespaces.contains(&join_path(prefix))
     }
 
     fn add_module<'arena>(
@@ -192,21 +213,27 @@ impl ModuleGraph {
         let root = parser.parse_file();
 
         let id = ModuleId(self.modules.len() as u32);
+        let key = join_path(&mod_path);
+        // Register the path itself plus every proper prefix as a namespace so
+        // `is_namespace` is O(1).
+        for n in 0..=mod_path.len() {
+            self.namespaces.insert(join_path(&mod_path[..n]));
+        }
         self.modules.push(Module {
             id,
             file_path,
-            mod_path: mod_path.clone(),
+            mod_path,
             root,
-            imports: HashMap::new(),
-            module_aliases: HashMap::new(),
+            bindings: HashMap::new(),
         });
-        self.by_path.insert(mod_path, id);
+        self.by_path.insert(key, id);
         Ok(id)
     }
 
-    /// Inspect a module's top-level `UseDecl` nodes and return the list of
-    /// module paths it imports (i.e. with the last segment dropped when the
-    /// import names an item rather than a module).
+    /// For each top-level `use` declaration in `mod_id`, return the module
+    /// path the loader should attempt to load: the longest prefix of the use
+    /// path that has a backing `.ecs` file. Globs and empty paths are skipped
+    /// — they're rejected by the semantic pass with a precise error.
     fn module_paths_to_load(&self, world: &AstWorld<'_>, mod_id: ModuleId) -> Vec<Vec<String>> {
         let module = &self.modules[mod_id.0 as usize];
         let mut out = Vec::new();
@@ -218,17 +245,10 @@ impl ModuleGraph {
 
         for &item in items {
             if let NodeKind::UseDecl { path } = *world.kind(item) {
-                // Skip globs — they're a semantic error, not a load target.
-                if path.contains(&"*") {
+                if path.contains(&"*") || path.is_empty() {
                     continue;
                 }
-                // `use a;` → load module `a`. `use a::b::c;` → load module `a::b`.
-                let segs: Vec<String> = if path.len() == 1 {
-                    path.iter().map(|s| s.to_string()).collect()
-                } else {
-                    path[..path.len() - 1].iter().map(|s| s.to_string()).collect()
-                };
-                if !segs.is_empty() {
+                if let Some(segs) = longest_existing_prefix(&self.entry_dir, path) {
                     out.push(segs);
                 }
             }
@@ -246,6 +266,31 @@ impl Module {
             self.mod_path.join("::")
         }
     }
+}
+
+/// Walk `path` from longest to shortest prefix and return the first one whose
+/// `.ecs` file exists relative to `entry_dir`. `None` means no prefix is a
+/// real file — the semantic pass will report the most informative error.
+fn longest_existing_prefix(entry_dir: &Path, path: &[&str]) -> Option<Vec<String>> {
+    for k in (1..=path.len()).rev() {
+        let prefix: Vec<String> = path[..k].iter().map(|s| s.to_string()).collect();
+        if resolve_module_file(entry_dir, &prefix).exists() {
+            return Some(prefix);
+        }
+    }
+    None
+}
+
+/// Join dotted path segments with `::`. Accepts `&[String]` or `&[&str]`.
+pub fn join_path<S: AsRef<str>>(segments: &[S]) -> String {
+    let mut out = String::new();
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(seg.as_ref());
+    }
+    out
 }
 
 fn resolve_module_file(entry_dir: &Path, mod_path: &[String]) -> PathBuf {

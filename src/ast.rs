@@ -206,8 +206,9 @@ pub struct AstWorld<'arena> {
     pub resolved: SecondaryMap<NodeId, NodeId>,
     /// Mangled symbol name for a `FnDecl` node (semantic pass).
     /// Codegen and interpreter look up functions via this name so they
-    /// never have to recompute mangling themselves.
-    pub mangled_names: SparseSecondaryMap<NodeId, String>,
+    /// never have to recompute mangling themselves. Arena-allocated so
+    /// reads are `Copy` and no clones are needed downstream.
+    pub mangled_names: SparseSecondaryMap<NodeId, &'arena str>,
 }
 
 impl<'arena> Default for AstWorld<'arena> {
@@ -241,5 +242,11 @@ impl<'arena> AstWorld<'arena> {
 
     pub fn span(&self, id: NodeId) -> Span {
         self.spans[id]
+    }
+
+    /// Mangled symbol name for a `FnDecl` node; panics if the semantic pass
+    /// has not yet populated it.
+    pub fn mangled(&self, id: NodeId) -> &'arena str {
+        self.mangled_names[id]
     }
 }

@@ -35,7 +35,7 @@ fn run_program_test_with_args(name: &str, args: &[&str]) {
     let mut world = AstWorld::new();
     let mut graph = modules::ModuleGraph::load(&entry, &arena, &mut world)
         .unwrap_or_else(|e| panic!("module load failed for {name}: {e}"));
-    passes::analyze(&mut world, &mut graph).expect("analysis failed");
+    passes::analyze(&mut world, &mut graph, &arena).expect("analysis failed");
 
     let tmp_dir = TempDir::new().expect("failed to create temp dir");
     let output_path = tmp_dir.path().join("output");
@@ -167,4 +167,14 @@ fn module_alias() {
 #[test]
 fn module_diamond() {
     run_program_test("module_diamond");
+}
+
+#[test]
+fn module_nested_alias() {
+    run_program_test("module_nested_alias");
+}
+
+#[test]
+fn module_full_path() {
+    run_program_test("module_full_path");
 }

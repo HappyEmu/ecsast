@@ -30,16 +30,6 @@ impl fmt::Display for Value {
     }
 }
 
-/// Format a value for `print()` — matches codegen behavior where bools
-/// are coerced to integers (`1`/`0`) before printing.
-fn print_format(v: &Value) -> String {
-    match v {
-        Value::Bool(true) => "1".to_string(),
-        Value::Bool(false) => "0".to_string(),
-        other => other.to_string(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Control-flow signal (private)
 // ---------------------------------------------------------------------------
@@ -61,18 +51,21 @@ impl Flow {
 // Execution environment
 // ---------------------------------------------------------------------------
 
-pub struct Env<'w> {
+pub struct Env<'w, 'arena> {
     scopes: Vec<HashMap<String, Value>>,
-    /// Function table keyed by mangled name. Populated once from the module graph.
-    fns: HashMap<String, (Vec<NodeId>, NodeId)>,
+    /// Function table keyed by arena-allocated mangled name.
+    fns: HashMap<&'arena str, (&'arena [NodeId], NodeId)>,
+    /// Command-line arguments visible to `argc()` / `arg(i)`.
+    args: Vec<String>,
     out: &'w mut dyn Write,
 }
 
-impl<'w> Env<'w> {
-    fn new(out: &'w mut dyn Write) -> Self {
+impl<'w, 'arena> Env<'w, 'arena> {
+    fn new(args: Vec<String>, out: &'w mut dyn Write) -> Self {
         Self {
             scopes: vec![HashMap::new()],
             fns: HashMap::new(),
+            args,
             out,
         }
     }
@@ -117,12 +110,25 @@ impl<'w> Env<'w> {
 // ---------------------------------------------------------------------------
 
 /// Run a program (multi-module) and capture output into the provided writer.
-pub fn run_with_output<W: Write>(
-    world: &AstWorld<'_>,
+/// No command-line arguments are visible — `argc()` returns `1` (program
+/// name only). Use [`run_with_args_and_output`] to pass argv.
+pub fn run_with_output<'arena, W: Write>(
+    world: &AstWorld<'arena>,
     graph: &ModuleGraph,
     out: &mut W,
 ) -> Value {
-    let mut env = Env::new(out);
+    run_with_args_and_output(world, graph, vec!["<program>".to_string()], out)
+}
+
+/// Run a program with an explicit `argv`. `args[0]` is the program name,
+/// matching the C/codegen convention.
+pub fn run_with_args_and_output<'arena, W: Write>(
+    world: &AstWorld<'arena>,
+    graph: &ModuleGraph,
+    args: Vec<String>,
+    out: &mut W,
+) -> Value {
+    let mut env: Env<'_, 'arena> = Env::new(args, out);
 
     // Register every FnDecl across every module, keyed by mangled name.
     for module in &graph.modules {
@@ -132,31 +138,31 @@ pub fn run_with_output<W: Write>(
         };
         for item in items.iter().copied() {
             if let NodeKind::FnDecl { params, body, .. } = world.kind(item) {
-                let mangled = world.mangled_names[item].clone();
-                env.fns.insert(mangled, (params.to_vec(), *body));
+                env.fns.insert(world.mangled(item), (*params, *body));
             }
         }
     }
 
     // Entry-module `main` is mangled to "main" by the semantic pass.
-    let (params, body) = env.fns.get("main").expect("no main function found").clone();
-    assert!(params.is_empty(), "main must take no parameters");
+    let (_params, body) = *env.fns.get("main").expect("no main function found");
 
     match eval_block(world, body, &mut env) {
         Flow::Val(v) | Flow::Ret(v) => v,
     }
 }
 
-/// Run a program, printing output to stdout.
-pub fn run(world: &AstWorld<'_>, graph: &ModuleGraph) -> Value {
-    run_with_output(world, graph, &mut std::io::stdout())
+/// Run a program, printing output to stdout and reading argv from
+/// `std::env::args()`.
+pub fn run<'arena>(world: &AstWorld<'arena>, graph: &ModuleGraph) -> Value {
+    let args: Vec<String> = std::env::args().collect();
+    run_with_args_and_output(world, graph, args, &mut std::io::stdout())
 }
 
 // ---------------------------------------------------------------------------
 // Core evaluator
 // ---------------------------------------------------------------------------
 
-fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env<'_>) -> Flow {
+fn eval<'arena>(world: &AstWorld<'arena>, id: NodeId, env: &mut Env<'_, 'arena>) -> Flow {
     match *world.kind(id) {
         NodeKind::IntLit(n) => Flow::Val(Value::Int(n)),
         NodeKind::FloatLit(f) => Flow::Val(Value::Float(f)),
@@ -192,9 +198,9 @@ fn eval(world: &AstWorld<'_>, id: NodeId, env: &mut Env<'_>) -> Flow {
 // Per-node evaluators
 // ---------------------------------------------------------------------------
 
-fn eval_binop(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
+fn eval_binop<'arena>(
+    world: &AstWorld<'arena>,
+    env: &mut Env<'_, 'arena>,
     op: BinOp,
     lhs: NodeId,
     rhs: NodeId,
@@ -204,9 +210,9 @@ fn eval_binop(
     Flow::Val(apply_binop(op, l, r))
 }
 
-fn eval_unaryop(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
+fn eval_unaryop<'arena>(
+    world: &AstWorld<'arena>,
+    env: &mut Env<'_, 'arena>,
     op: UnaryOp,
     operand: NodeId,
 ) -> Flow {
@@ -214,9 +220,9 @@ fn eval_unaryop(
     Flow::Val(apply_unary(op, v))
 }
 
-fn eval_call(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
+fn eval_call<'arena>(
+    world: &AstWorld<'arena>,
+    env: &mut Env<'_, 'arena>,
     callee: NodeId,
     args: &[NodeId],
 ) -> Flow {
@@ -224,18 +230,17 @@ fn eval_call(
     // and the mangled name lives in world.mangled_names. Interpreter looks up
     // the same mangled name in env.fns.
     let target_fn = world.resolved[callee];
-    let mangled = &world.mangled_names[target_fn];
+    let mangled = world.mangled(target_fn);
 
     let arg_vals: Vec<Value> = args
         .iter()
         .map(|&a| eval(world, a, env).into_value())
         .collect();
 
-    let (param_ids, body) = env
+    let (param_ids, body) = *env
         .fns
         .get(mangled)
-        .unwrap_or_else(|| panic!("undefined function: {mangled}"))
-        .clone();
+        .unwrap_or_else(|| panic!("undefined function: {mangled}"));
 
     env.push_scope();
     for (&param_id, val) in param_ids.iter().zip(arg_vals) {
@@ -250,9 +255,9 @@ fn eval_call(
 }
 
 /// Evaluate a call to a language built-in.
-fn eval_builtin_call(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
+fn eval_builtin_call<'arena>(
+    world: &AstWorld<'arena>,
+    env: &mut Env<'_, 'arena>,
     builtin: Builtin,
     args: &[NodeId],
 ) -> Flow {
@@ -264,18 +269,30 @@ fn eval_builtin_call(
                 .collect();
             let s = arg_vals
                 .iter()
-                .map(print_format)
+                .map(Value::to_string)
                 .collect::<Vec<_>>()
                 .join(" ");
             writeln!(env.out, "{s}").expect("write failed");
             Flow::Val(Value::Unit)
         }
-        Builtin::Argc => panic!("argc() is not supported in the interpreter"),
-        Builtin::Arg => panic!("arg() is not supported in the interpreter"),
+        Builtin::Argc => Flow::Val(Value::Int(env.args.len() as i64)),
+        Builtin::Arg => {
+            assert!(args.len() == 1, "arg() takes exactly 1 argument");
+            let idx = match eval(world, args[0], env).into_value() {
+                Value::Int(n) => n,
+                other => panic!("arg() index must be int, got {other:?}"),
+            };
+            let s = env
+                .args
+                .get(idx as usize)
+                .unwrap_or_else(|| panic!("arg({idx}) out of bounds (argc = {})", env.args.len()))
+                .clone();
+            Flow::Val(Value::Str(s))
+        }
     }
 }
 
-fn eval_let(world: &AstWorld<'_>, env: &mut Env<'_>, name: &str, init: Option<NodeId>) -> Flow {
+fn eval_let<'arena>(world: &AstWorld<'arena>, env: &mut Env<'_, 'arena>, name: &str, init: Option<NodeId>) -> Flow {
     let val = match init {
         Some(init_id) => eval(world, init_id, env).into_value(),
         None => Value::Unit,
@@ -284,7 +301,7 @@ fn eval_let(world: &AstWorld<'_>, env: &mut Env<'_>, name: &str, init: Option<No
     Flow::Val(Value::Unit)
 }
 
-fn eval_assign(world: &AstWorld<'_>, env: &mut Env<'_>, target: NodeId, value: NodeId) -> Flow {
+fn eval_assign<'arena>(world: &AstWorld<'arena>, env: &mut Env<'_, 'arena>, target: NodeId, value: NodeId) -> Flow {
     let name = match world.kind(target) {
         NodeKind::Ident(n) => *n,
         _ => panic!("assignment target must be an identifier"),
@@ -294,7 +311,7 @@ fn eval_assign(world: &AstWorld<'_>, env: &mut Env<'_>, target: NodeId, value: N
     Flow::Val(Value::Unit)
 }
 
-fn eval_return(world: &AstWorld<'_>, env: &mut Env<'_>, opt: Option<NodeId>) -> Flow {
+fn eval_return<'arena>(world: &AstWorld<'arena>, env: &mut Env<'_, 'arena>, opt: Option<NodeId>) -> Flow {
     let val = match opt {
         Some(expr) => eval(world, expr, env).into_value(),
         None => Value::Unit,
@@ -302,9 +319,9 @@ fn eval_return(world: &AstWorld<'_>, env: &mut Env<'_>, opt: Option<NodeId>) -> 
     Flow::Ret(val)
 }
 
-fn eval_if(
-    world: &AstWorld<'_>,
-    env: &mut Env<'_>,
+fn eval_if<'arena>(
+    world: &AstWorld<'arena>,
+    env: &mut Env<'_, 'arena>,
     cond: NodeId,
     then_block: NodeId,
     else_block: Option<NodeId>,
@@ -320,7 +337,7 @@ fn eval_if(
     }
 }
 
-fn eval_while(world: &AstWorld<'_>, env: &mut Env<'_>, cond: NodeId, body: NodeId) -> Flow {
+fn eval_while<'arena>(world: &AstWorld<'arena>, env: &mut Env<'_, 'arena>, cond: NodeId, body: NodeId) -> Flow {
     loop {
         let cond_val = eval(world, cond, env).into_value();
         match cond_val {
@@ -339,7 +356,7 @@ fn eval_while(world: &AstWorld<'_>, env: &mut Env<'_>, cond: NodeId, body: NodeI
 // Block evaluator — manages its own scope
 // ---------------------------------------------------------------------------
 
-fn eval_block(world: &AstWorld<'_>, id: NodeId, env: &mut Env<'_>) -> Flow {
+fn eval_block<'arena>(world: &AstWorld<'arena>, id: NodeId, env: &mut Env<'_, 'arena>) -> Flow {
     let stmts = match world.kind(id) {
         NodeKind::Block(stmts) => *stmts,
         _ => panic!("eval_block called on non-Block node"),

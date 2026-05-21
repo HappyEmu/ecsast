@@ -20,6 +20,8 @@ The compiler accepts a `.ecs` source file as a positional argument and produces 
 cargo run -- <FILE>              # compile to ./output
 cargo run -- <FILE> -o <NAME>    # compile to custom output path
 cargo run -- <FILE> -O speed     # compile with optimizations
+cargo run -- <FILE> --print-ast  # dump post-analysis AST instead of compiling
+cargo run -- <FILE> --time       # report per-phase timing diagnostics
 ```
 
 Examples:
@@ -39,37 +41,63 @@ ECSAST is a language implementation that uses an **Entity-Component-System (ECS)
 ### Pipeline
 
 ```
-Source file (.ecs) → Lexer → Vec<Token> → Parser → AstWorld{kinds,spans} → Cranelift Codegen → Native Binary
+Entry .ecs file
+   │
+   ▼
+modules::ModuleGraph::load
+   │   Lex + parse the entry file, follow every `use` decl, lex+parse each
+   │   sibling/nested file into the same arena + AstWorld.
+   ▼
+AstWorld {kinds, spans}            (populated eagerly by parser)
+   │
+   ▼
+passes::analyze
+   │   1. compute_parents
+   │   2. collect_signatures (per module: param/return types, mangling)
+   │   3. resolve_use_decls (each module's `bindings: name → Module|Func`)
+   │   4. type-check every function body (populates `types`, `resolved`)
+   ▼
+AstWorld {kinds, spans, types, parents, resolved, mangled_names}
+   │
+   ├──► codegen::compile  → object file + linked native binary
+   └──► interpreter::run* → direct tree-walking evaluator
 ```
 
-The interpreter (`interpreter.rs`) is a tree-walking evaluator that runs programs directly without compilation. It is tested against the same `tests/programs/` fixtures as the codegen path. Passes (`passes.rs`) exist but are currently unused. `main.rs` drives the Cranelift codegen path.
+The interpreter (`interpreter.rs`) is a tree-walking evaluator that runs programs directly without compilation. It is tested against the same `tests/programs/` fixtures as the codegen path and supports `argc()`/`arg(i)` via the `run_with_args_and_output` entry point.
 
 ### Module Roles
 
 | Module | Role |
 |---|---|
-| `lexer.rs` | Hand-written tokenizer; produces `Vec<(TokenKind, Span)>` |
+| `lexer.rs` | Hand-written tokenizer; produces `Vec<Token<'src>>` borrowing identifier/string slices from the source (`Cow<'src, str>` for strings to handle escapes) |
 | `parser.rs` | Recursive-descent parser with precedence climbing; populates `AstWorld.kinds` and `.spans`, returns root `NodeId` |
-| `ast.rs` | `NodeId`, `NodeKind` (Copy enum), `TypeInfo`, and `AstWorld` (the ECS store) |
-| `codegen.rs` | Cranelift-based native compiler; `Compiler` struct with two-pass function compilation (declare then define), emits object file and links with C runtime |
-| `passes.rs` | Independent tree-walk passes that annotate `AstWorld` in-place (`annotate_literal_types`, `compute_parents`) — currently unused |
-| `interpreter.rs` | Tree-walking evaluator; `Env` holds scoped variables, function registry, and `&mut dyn Write` for output capture; `Flow` signals early returns. Tested against the same fixtures as codegen |
-| `printer.rs` | Debug pretty-printer for the AST (reads `kinds`, `spans`, `types`) |
+| `ast.rs` | `NodeId` (slotmap key), `NodeKind` (Copy enum), `TypeInfo`, and `AstWorld` (the ECS store) |
+| `modules.rs` | Multi-file loader; transitive `use` resolution; `ModuleGraph` with `by_path: HashMap<String, ModuleId>` and `namespaces: HashSet<String>` for O(1) prefix lookups |
+| `passes.rs` | `analyze()` drives parent linking, signature collection, mangling, `use` resolution, and per-function type checking |
+| `codegen.rs` / `codegen/emit.rs` | Cranelift-based native compiler; `Compiler` struct with two-pass function compilation (declare then define), emits object file and links with C runtime |
+| `codegen/link.rs` | Embedded C runtime + `cc` invocation |
+| `codegen/runtime.rs` | `RuntimeFn` enum + Cranelift declarations for the C runtime functions |
+| `interpreter.rs` | Tree-walking evaluator; `Env<'_, 'arena>` holds scoped variables, mangled-name → function table, `args`, and `&mut dyn Write` for output capture; `Flow` signals early returns |
+| `printer.rs` | Debug pretty-printer used by `--print-ast`; renders `types`, `resolved`, and `mangled_names` annotations when populated |
 | `span.rs` | Byte-range `Span` struct for source locations |
 
 ### AstWorld Component Stores
 
 ```rust
 pub struct AstWorld<'arena> {
-    pub kinds:    HashMap<NodeId, NodeKind<'arena>>,  // filled by parser
-    pub spans:    HashMap<NodeId, Span>,               // filled by parser
-    pub types:    HashMap<NodeId, TypeInfo>,           // filled by annotate_literal_types pass
-    pub parents:  HashMap<NodeId, NodeId>,             // filled by compute_parents pass
-    pub resolved: HashMap<NodeId, NodeId>,             // reserved for name-resolution (unused)
+    // Eagerly populated during parsing
+    pub kinds:         SlotMap<NodeId, NodeKind<'arena>>,
+    pub spans:         SecondaryMap<NodeId, Span>,
+
+    // Lazily populated by passes::analyze
+    pub types:         SparseSecondaryMap<NodeId, TypeInfo>,        // type checker
+    pub parents:       SecondaryMap<NodeId, NodeId>,                // parent-link pass
+    pub resolved:      SecondaryMap<NodeId, NodeId>,                // Ident/Path → decl
+    pub mangled_names: SparseSecondaryMap<NodeId, &'arena str>,     // FnDecl → linker symbol
 }
 ```
 
-Passes are lazy and independent: the parser only fills `kinds`/`spans`; each pass adds to other stores without touching earlier ones. New passes can be added without modifying existing code.
+Passes are lazy and independent: the parser only fills `kinds`/`spans`; subsequent passes add to other stores without touching earlier ones. Mangled names are arena-allocated so downstream readers (codegen, interpreter) can use them as `Copy` keys without cloning.
 
 ### Key Design Details
 
@@ -96,7 +124,9 @@ Control flow patterns:
 - **while**: header block (sealed after back-edge) → body → back-edge jump; exit block
 - **return**: emits `return_` instruction and marks block as terminated
 
-C runtime (`RUNTIME_C`): compiled and linked automatically; provides `ecsast_print_int(long)`, `ecsast_print_float(double)`, `ecsast_print_str(const char*, long)`, `ecsast_init_args(int, char**)`, `ecsast_argc()`, and `ecsast_arg(long, const char**, long*)`. All runtime functions use the `ecsast_` prefix to avoid collisions with user-defined function names.
+C runtime (`RUNTIME_C` in `codegen/link.rs`): compiled and linked automatically. Provides `ecsast_print_int(long)`, `ecsast_print_float(double)`, `ecsast_print_bool(signed char)`, `ecsast_print_str(const char*, long)`, `ecsast_init_args(int, char**)`, `ecsast_argc()`, `ecsast_arg(long, const char**, long*)`, `ecsast_ipow(long, long)`, `ecsast_fpow(double, double)`, and `ecsast_fmod(double, double)`. All runtime functions use the `ecsast_` prefix to avoid collisions with user-defined function names.
+
+Codegen reads types from `world.types` (populated by the semantic pass) rather than re-deriving them from `NodeKind::TypeName` strings. The `valtype_of(node)` helper in `codegen/emit.rs` projects `TypeInfo → ValType`.
 
 ### Cranelift API Notes (v0.128)
 
@@ -138,11 +168,21 @@ Supported constructs:
 - **Built-ins**: `print()` (int, float, bool, str), `argc()`, `arg(i)` → `str` (command-line arguments)
 - **Entry point**: program must define a `fn main()` with no parameters
 
+### Multi-file modules
+
+A program may span multiple `.ecs` files. `use a::b::c;` imports the trailing name into local scope; `pub fn name` exposes a function across module boundaries. The loader walks `use` decls from the entry file, loading whichever prefix has a backing `.ecs` file:
+
+- `["math"]`           → `<entry_dir>/math.ecs`
+- `["math","geometry"]`→ `<entry_dir>/math/geometry.ecs`
+
+`ModuleGraph::is_namespace` is O(1) — every loaded module's path and proper prefixes are pre-inserted into a `HashSet<String>` namespace set.
+
 ### Tests
 
 - **Parser unit tests** live in `src/parser.rs` (inline `#[cfg(test)]` module). They test parse-tree structure by querying `AstWorld` after parsing.
 - **End-to-end codegen tests** live in `tests/compile_and_run.rs`. They compile example programs from `tests/programs/`, run the resulting binaries, and assert on stdout output.
-- **Interpreter tests** live in `tests/interpreter.rs`. They parse and interpret the same `tests/programs/` fixtures in-process using `run_program_with_output` with a `Vec<u8>` buffer, asserting output matches expected. All programs except `args` (which needs `argc`/`arg` built-ins not yet in the interpreter) are covered.
+- **Interpreter tests** live in `tests/interpreter.rs`. They parse and interpret the same `tests/programs/` fixtures in-process using `run_with_args_and_output` with a `Vec<u8>` buffer, asserting output matches expected. The `args` and `string_args` fixtures are covered because the interpreter implements `argc()`/`arg(i)` via a configurable argv slot on `Env`.
+- **Semantic-error tests** live in `tests/analysis.rs` (typed-pass behavior) and `tests/analysis_errors.rs` (loader + analyzer error messages).
 - **Example programs** in `examples/` (`.ecs` files) can be compiled directly with `cargo run -- examples/<name>.ecs`.
 
 ### Adding a New Language Feature
@@ -152,6 +192,10 @@ Typical workflow for adding a new keyword or construct:
 1. **Lexer** (`lexer.rs`): add a `TokenKind` variant and a keyword match arm in `lex_ident_or_keyword`
 2. **AST** (`ast.rs`): add or extend a `NodeKind` variant with new fields
 3. **Parser** (`parser.rs`): update `parse_item`/`parse_stmt`/`parse_expr` to handle the new token and produce the new `NodeKind`
-4. **Codegen** (`codegen.rs`): update pattern matches on `NodeKind` in `compile_stmt`/`compile_expr` and add IR generation
-5. **Other modules**: update pattern matches in `printer.rs`, `passes.rs`, `interpreter.rs` (use `..` in patterns to avoid breakage from new fields)
-6. **Tests**: add a test program in `tests/programs/<name>/` with `source.ecs` and `expected_output`, add a test function in both `tests/compile_and_run.rs` and `tests/interpreter.rs`
+4. **Semantic** (`passes.rs`): if the construct introduces new typing rules or name resolution, extend `Analyzer::check_*` and (for top-level items) `collect_signatures`/`resolve_use_decls`
+5. **Codegen** (`codegen/emit.rs`): update pattern matches on `NodeKind` in `compile_stmt`/`compile_expr` and add IR generation. Read types from `world.types[node]` via `valtype_of` rather than re-parsing `TypeName`.
+6. **Interpreter** (`interpreter.rs`): mirror the new behavior in `eval`/`eval_*` so codegen and interpreter stay aligned
+7. **Printer** (`printer.rs`): extend the match so `--print-ast` keeps working
+8. **Tests**: add a test program in `tests/programs/<name>/` with `source.ecs` and `expected_output`; wire it into `tests/compile_and_run.rs` and `tests/interpreter.rs`
+
+When pattern-matching `NodeKind` in code that doesn't care about new fields, use `..` so future variant extensions don't break it.

@@ -1,18 +1,18 @@
 === AND ===
-1
-0
-0
-0
+true
+false
+false
+false
 === OR ===
-1
-1
-1
-0
+true
+true
+true
+false
 === NOT ===
-0
-1
+false
+true
 === comparisons in logic ===
-1
-0
-1
-0
+true
+false
+true
+false

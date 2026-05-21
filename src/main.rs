@@ -7,6 +7,7 @@ use ecsast::ast::AstWorld;
 use ecsast::codegen::{self, OptLevel};
 use ecsast::modules;
 use ecsast::passes;
+use ecsast::printer;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum CliOptLevel {
@@ -46,6 +47,10 @@ struct Cli {
     /// Print timing diagnostics for each compilation phase
     #[arg(long)]
     time: bool,
+
+    /// Dump the post-analysis AST to stdout instead of compiling
+    #[arg(long = "print-ast")]
+    print_ast: bool,
 }
 
 fn print_timings(
@@ -74,11 +79,18 @@ fn main() {
     let load_time = t0.elapsed();
 
     let t1 = Instant::now();
-    if let Err(err) = passes::analyze(&mut world, &mut graph) {
+    if let Err(err) = passes::analyze(&mut world, &mut graph, &arena) {
         eprintln!("Analysis error: {err}");
         std::process::exit(1);
     }
     let analysis_time = t1.elapsed();
+
+    if cli.print_ast {
+        for module in &graph.modules {
+            printer::print_ast(&world, module.root, 0);
+        }
+        return;
+    }
 
     let output = cli.output.to_str().expect("invalid output path");
     let t2 = Instant::now();

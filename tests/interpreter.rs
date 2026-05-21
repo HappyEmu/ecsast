@@ -18,6 +18,10 @@ fn entry_for(name: &str) -> PathBuf {
 }
 
 fn run_interpreter_test(name: &str) {
+    run_interpreter_test_with_args(name, &[]);
+}
+
+fn run_interpreter_test_with_args(name: &str, args: &[&str]) {
     let entry = entry_for(name);
     let expected = fs::read_to_string(format!("tests/programs/{name}/expected_output"))
         .unwrap_or_else(|e| panic!("failed to read expected_output for {name}: {e}"));
@@ -26,10 +30,13 @@ fn run_interpreter_test(name: &str) {
     let mut world = AstWorld::new();
     let mut graph = modules::ModuleGraph::load(&entry, &arena, &mut world)
         .unwrap_or_else(|e| panic!("module load failed for {name}: {e}"));
-    passes::analyze(&mut world, &mut graph).expect("analysis failed");
+    passes::analyze(&mut world, &mut graph, &arena).expect("analysis failed");
+
+    let mut argv: Vec<String> = vec!["<program>".to_string()];
+    argv.extend(args.iter().map(|s| s.to_string()));
 
     let mut output = Vec::new();
-    interpreter::run_with_output(&world, &graph, &mut output);
+    interpreter::run_with_args_and_output(&world, &graph, argv, &mut output);
 
     let stdout = String::from_utf8(output).expect("non-UTF8 output");
     assert_eq!(stdout, expected, "output mismatch for program '{name}'");
@@ -128,4 +135,24 @@ fn module_alias() {
 #[test]
 fn module_diamond() {
     run_interpreter_test("module_diamond");
+}
+
+#[test]
+fn module_nested_alias() {
+    run_interpreter_test("module_nested_alias");
+}
+
+#[test]
+fn module_full_path() {
+    run_interpreter_test("module_full_path");
+}
+
+#[test]
+fn args() {
+    run_interpreter_test_with_args("args", &["hello", "world"]);
+}
+
+#[test]
+fn string_args() {
+    run_interpreter_test_with_args("string_args", &["hello", "world"]);
 }

@@ -22,7 +22,7 @@ fn run_failure(name: &str) {
 
     let actual = match modules::ModuleGraph::load(&entry, &arena, &mut world) {
         Err(e) => e.to_string(),
-        Ok(mut graph) => match passes::analyze(&mut world, &mut graph) {
+        Ok(mut graph) => match passes::analyze(&mut world, &mut graph, &arena) {
             Err(e) => e.to_string(),
             Ok(()) => panic!("expected {name} to fail but it succeeded"),
         },

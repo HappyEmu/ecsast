@@ -47,20 +47,23 @@ fn analyze_source(src: &str) -> usize {
     let root = parser.parse_file();
 
     let mut by_path = HashMap::new();
-    by_path.insert(Vec::<String>::new(), ModuleId(0));
+    by_path.insert(String::new(), ModuleId(0));
+    let mut namespaces = std::collections::HashSet::new();
+    namespaces.insert(String::new());
     let mut graph = ModuleGraph {
         modules: vec![Module {
             id: ModuleId(0),
             file_path: PathBuf::from("<bench>"),
             mod_path: Vec::new(),
             root,
-            imports: HashMap::new(),
-            module_aliases: HashMap::new(),
+            bindings: HashMap::new(),
         }],
         by_path,
+        namespaces,
         entry: ModuleId(0),
+        entry_dir: PathBuf::from("."),
     };
-    passes::analyze(&mut world, &mut graph).expect("analysis failed");
+    passes::analyze(&mut world, &mut graph, &arena).expect("analysis failed");
     world.types.len() + world.resolved.len() + world.parents.len()
 }
 

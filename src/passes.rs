@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use bumpalo::Bump;
+
 use crate::ast::{AstWorld, BinOp, Builtin, NodeId, NodeKind, TypeInfo, UnaryOp};
-use crate::modules::{ModuleGraph, ModuleId};
+use crate::modules::{Binding, ModuleGraph, ModuleId};
 use crate::span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,43 +68,75 @@ pub fn compute_parents(world: &mut AstWorld<'_>, id: NodeId, parent: Option<Node
         world.parents.insert(id, p);
     }
 
-    let children: Vec<NodeId> = match *world.kind(id) {
-        NodeKind::Program(items) => items.to_vec(),
+    // Recurse per arm so we don't allocate a Vec<NodeId> for the child list.
+    match *world.kind(id) {
+        NodeKind::Program(items) | NodeKind::Block(items) => {
+            for &child in items {
+                compute_parents(world, child, Some(id));
+            }
+        }
         NodeKind::FnDecl {
             params,
             ret_ty,
             body,
             ..
         } => {
-            let mut ch: Vec<_> = params.to_vec();
-            ch.extend(ret_ty);
-            ch.push(body);
-            ch
+            for &p in params {
+                compute_parents(world, p, Some(id));
+            }
+            if let Some(r) = ret_ty {
+                compute_parents(world, r, Some(id));
+            }
+            compute_parents(world, body, Some(id));
         }
-        NodeKind::Param { ty, .. } => ty.into_iter().collect(),
-        NodeKind::Block(stmts) => stmts.to_vec(),
-        NodeKind::LetStmt { ty, init, .. } => ty.into_iter().chain(init).collect(),
-        NodeKind::AssignStmt { target, value } => vec![target, value],
-        NodeKind::ReturnStmt(v) => v.into_iter().collect(),
+        NodeKind::Param { ty, .. } | NodeKind::LetStmt { ty, init: None, .. } => {
+            if let Some(t) = ty {
+                compute_parents(world, t, Some(id));
+            }
+        }
+        NodeKind::LetStmt { ty, init: Some(init), .. } => {
+            if let Some(t) = ty {
+                compute_parents(world, t, Some(id));
+            }
+            compute_parents(world, init, Some(id));
+        }
+        NodeKind::AssignStmt { target, value } => {
+            compute_parents(world, target, Some(id));
+            compute_parents(world, value, Some(id));
+        }
+        NodeKind::ReturnStmt(Some(v)) => compute_parents(world, v, Some(id)),
+        NodeKind::ReturnStmt(None) => {}
         NodeKind::IfStmt {
             cond,
             then_block,
             else_block,
         } => {
-            let mut ch = vec![cond, then_block];
-            ch.extend(else_block);
-            ch
+            compute_parents(world, cond, Some(id));
+            compute_parents(world, then_block, Some(id));
+            if let Some(eb) = else_block {
+                compute_parents(world, eb, Some(id));
+            }
         }
-        NodeKind::WhileStmt { cond, body } => vec![cond, body],
-        NodeKind::BinOp { lhs, rhs, .. } => vec![lhs, rhs],
-        NodeKind::UnaryOp { operand, .. } => vec![operand],
+        NodeKind::WhileStmt { cond, body } => {
+            compute_parents(world, cond, Some(id));
+            compute_parents(world, body, Some(id));
+        }
+        NodeKind::BinOp { lhs, rhs, .. } => {
+            compute_parents(world, lhs, Some(id));
+            compute_parents(world, rhs, Some(id));
+        }
+        NodeKind::UnaryOp { operand, .. } => compute_parents(world, operand, Some(id)),
         NodeKind::Call { callee, args } => {
-            let mut ch = vec![callee];
-            ch.extend_from_slice(args);
-            ch
+            compute_parents(world, callee, Some(id));
+            for &a in args {
+                compute_parents(world, a, Some(id));
+            }
         }
-        NodeKind::BuiltinCall { args, .. } => args.to_vec(),
-        // Leaves
+        NodeKind::BuiltinCall { args, .. } => {
+            for &a in args {
+                compute_parents(world, a, Some(id));
+            }
+        }
         NodeKind::IntLit(_)
         | NodeKind::FloatLit(_)
         | NodeKind::BoolLit(_)
@@ -110,11 +144,7 @@ pub fn compute_parents(world: &mut AstWorld<'_>, id: NodeId, parent: Option<Node
         | NodeKind::Ident(_)
         | NodeKind::Path { .. }
         | NodeKind::TypeName(_)
-        | NodeKind::UseDecl { .. } => vec![],
-    };
-
-    for child in children {
-        compute_parents(world, child, Some(id));
+        | NodeKind::UseDecl { .. } => {}
     }
 }
 
@@ -138,7 +168,7 @@ struct FuncSig {
 }
 
 #[derive(Clone)]
-struct Binding {
+struct Local {
     decl: NodeId,
     ty: TypeInfo,
 }
@@ -160,7 +190,11 @@ impl Flow {
 /// Per-module function tables, indexed by `ModuleId.0`.
 type ModuleFuncs = Vec<HashMap<String, FuncSig>>;
 
-pub fn analyze(world: &mut AstWorld<'_>, graph: &mut ModuleGraph) -> AnalysisResult<()> {
+pub fn analyze<'arena>(
+    world: &mut AstWorld<'arena>,
+    graph: &mut ModuleGraph,
+    arena: &'arena Bump,
+) -> AnalysisResult<()> {
     world.types.clear();
     world.parents.clear();
     world.resolved.clear();
@@ -174,7 +208,7 @@ pub fn analyze(world: &mut AstWorld<'_>, graph: &mut ModuleGraph) -> AnalysisRes
     // Phase 1: collect signatures + assign mangled names.
     let mut module_funcs: ModuleFuncs = vec![HashMap::new(); graph.modules.len()];
     for module_idx in 0..graph.modules.len() {
-        collect_signatures(world, graph, ModuleId(module_idx as u32), &mut module_funcs)?;
+        collect_signatures(world, graph, ModuleId(module_idx as u32), &mut module_funcs, arena)?;
     }
 
     // Phase 2: resolve `use` decls on each module (populates module.imports / module_aliases).
@@ -198,11 +232,12 @@ pub fn analyze(world: &mut AstWorld<'_>, graph: &mut ModuleGraph) -> AnalysisRes
     Ok(())
 }
 
-fn collect_signatures(
-    world: &mut AstWorld<'_>,
+fn collect_signatures<'arena>(
+    world: &mut AstWorld<'arena>,
     graph: &ModuleGraph,
     module_id: ModuleId,
     module_funcs: &mut ModuleFuncs,
+    arena: &'arena Bump,
 ) -> AnalysisResult<()> {
     let module = &graph.modules[module_id.0 as usize];
     let is_entry = module_id == graph.entry;
@@ -269,10 +304,10 @@ fn collect_signatures(
 
                 // Mangling: entry `main` stays as `main` for the linker.
                 // Otherwise: `ecs[__seg]*__name` so cross-module symbols stay distinct.
-                let mangled = if is_entry && name == "main" {
-                    "main".to_string()
+                let mangled: &'arena str = if is_entry && name == "main" {
+                    "main"
                 } else {
-                    mangle_name(&mod_path, name)
+                    arena.alloc_str(&mangle_name(&mod_path, name))
                 };
                 world.mangled_names.insert(item, mangled);
 
@@ -312,6 +347,15 @@ fn collect_signatures(
     Ok(())
 }
 
+/// A path resolves to either a module (a known prefix in the graph) or a
+/// function (a public item in the trailing module). The semantic pass uses
+/// this to populate `bindings` and to resolve call-site paths.
+#[derive(Clone, Copy, Debug)]
+enum Resolved {
+    Module(ModuleId),
+    Func { node: NodeId, owner: ModuleId },
+}
+
 fn resolve_use_decls(
     world: &AstWorld<'_>,
     graph: &mut ModuleGraph,
@@ -324,9 +368,7 @@ fn resolve_use_decls(
         _ => return Ok(()),
     };
 
-    // Drain temp maps into the module struct at the end to avoid double-borrow.
-    let mut imports: HashMap<String, (ModuleId, NodeId)> = HashMap::new();
-    let mut module_aliases: HashMap<String, ModuleId> = HashMap::new();
+    let mut bindings: HashMap<String, Binding> = HashMap::new();
 
     for &item in items {
         let NodeKind::UseDecl { path } = *world.kind(item) else {
@@ -349,91 +391,90 @@ fn resolve_use_decls(
             ));
         }
 
-        if path.len() == 1 {
-            // Module alias: `use math;`
-            let name = path[0];
-            let target = graph
-                .by_path
-                .get(&vec![name.to_string()])
-                .copied()
-                .ok_or_else(|| {
-                    error_at(
-                        world,
-                        item,
-                        format!("module `{name}` not found"),
-                    )
-                })?;
-            if target == module_id {
+        let resolved = resolve_path_segments(graph, module_funcs, path)
+            .map_err(|msg| error_at(world, item, msg))?;
+
+        match resolved {
+            Resolved::Module(m) if m == module_id => {
+                let label = display_path(path);
                 return Err(error_at(
                     world,
                     item,
-                    format!("module `{name}` cannot import itself"),
+                    format!("module `{label}` cannot import itself"),
                 ));
             }
-            if module_aliases.contains_key(name) || imports.contains_key(name) {
-                return Err(error_at(
-                    world,
-                    item,
-                    format!("name `{name}` is imported twice"),
-                ));
-            }
-            module_aliases.insert(name.to_string(), target);
-        } else {
-            // Item-import: `use a::b::c;`
-            let module_segs: Vec<String> = path[..path.len() - 1]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            let module_label = module_segs.join("::");
-            let target_mod = graph
-                .by_path
-                .get(&module_segs)
-                .copied()
-                .ok_or_else(|| {
-                    error_at(
-                        world,
-                        item,
-                        format!("module `{module_label}` not found"),
-                    )
-                })?;
-            if target_mod == module_id {
-                return Err(error_at(
-                    world,
-                    item,
-                    format!("module `{module_label}` cannot import itself"),
-                ));
-            }
-            let sig = module_funcs[target_mod.0 as usize]
-                .get(last)
-                .ok_or_else(|| {
-                    error_at(
-                        world,
-                        item,
-                        format!("module `{module_label}` has no item `{last}`"),
-                    )
-                })?;
-            if !sig.is_pub {
-                return Err(error_at(
-                    world,
-                    item,
-                    format!("function `{last}` in module `{module_label}` is not public"),
-                ));
-            }
-            if module_aliases.contains_key(last) || imports.contains_key(last) {
-                return Err(error_at(
-                    world,
-                    item,
-                    format!("name `{last}` is imported twice"),
-                ));
-            }
-            imports.insert(last.to_string(), (target_mod, sig.node));
+            _ => {}
         }
+
+        if bindings.contains_key(last) {
+            return Err(error_at(
+                world,
+                item,
+                format!("name `{last}` is imported twice"),
+            ));
+        }
+        bindings.insert(last.to_string(), resolved.into());
     }
 
-    let module = &mut graph.modules[module_id.0 as usize];
-    module.imports = imports;
-    module.module_aliases = module_aliases;
+    graph.modules[module_id.0 as usize].bindings = bindings;
     Ok(())
+}
+
+/// Walk a multi-segment path through the module graph for a `use` declaration.
+fn resolve_path_segments(
+    graph: &ModuleGraph,
+    module_funcs: &ModuleFuncs,
+    segments: &[&str],
+) -> Result<Resolved, String> {
+    if segments.is_empty() {
+        return Err("empty path".to_string());
+    }
+
+    // Walk segments[0..n-1] as a module chain; the resulting prefix must be
+    // a loaded module (so we can look up the trailing segment as an item) or
+    // — if the whole path is itself a loaded module — the path itself.
+    if let Some(mod_id) = graph.lookup(segments) {
+        return Ok(Resolved::Module(mod_id));
+    }
+
+    if segments.len() == 1 {
+        return Err(format!("module `{}` not found", segments[0]));
+    }
+
+    let prefix = &segments[..segments.len() - 1];
+    let owner = graph
+        .lookup(prefix)
+        .ok_or_else(|| format!("module `{}` not found", display_path(prefix)))?;
+    let last = *segments.last().unwrap();
+    let sig = module_funcs[owner.0 as usize].get(last).ok_or_else(|| {
+        format!(
+            "module `{}` has no item `{last}`",
+            display_path(prefix)
+        )
+    })?;
+    if !sig.is_pub {
+        return Err(format!(
+            "function `{last}` in module `{}` is not public",
+            display_path(prefix)
+        ));
+    }
+    Ok(Resolved::Func {
+        node: sig.node,
+        owner,
+    })
+}
+
+fn display_path(segments: &[&str]) -> String {
+    segments.join("::")
+}
+
+impl From<Resolved> for Binding {
+    fn from(r: Resolved) -> Self {
+        match r {
+            Resolved::Module(m) => Binding::Module(m),
+            Resolved::Func { node, owner } => Binding::Func { node, owner },
+        }
+    }
 }
 
 fn mangle_name(mod_path: &[String], fn_name: &str) -> String {
@@ -471,7 +512,7 @@ struct Analyzer<'w, 'arena, 'g> {
     graph: &'g ModuleGraph,
     module: ModuleId,
     module_funcs: &'g ModuleFuncs,
-    scopes: Vec<HashMap<String, Binding>>,
+    scopes: Vec<HashMap<String, Local>>,
 }
 
 impl<'w, 'arena, 'g> Analyzer<'w, 'arena, 'g> {
@@ -821,18 +862,21 @@ impl<'w, 'arena, 'g> Analyzer<'w, 'arena, 'g> {
         callee: NodeId,
         args: &'arena [NodeId],
     ) -> AnalysisResult<TypeInfo> {
-        // R3: callee is always a Path. Resolve via this module's tables.
+        // R3: callee is always a Path. Resolve via this module's bindings and
+        // the graph; lookup is uniform from depth 1 to arbitrary depth.
         let NodeKind::Path { segments } = *self.world.kind(callee) else {
             return Err(self.error(callee, "callee must be a function path"));
         };
 
-        let target_node = self.resolve_path(callee, segments)?;
-
-        // Look up the signature: find the owning module and the function name.
-        let sig = self.signature_for(target_node).ok_or_else(|| {
-            self.error(callee, "internal: resolved function has no signature")
-        })?;
-        let display_name = segments.join("::");
+        let (target_node, owner) = self.resolve_call_path(callee, segments)?;
+        // Borrow sig from module_funcs (lifetime 'g, independent of `self`)
+        // so we can call &mut self methods while reading sig fields.
+        let module_funcs: &'g ModuleFuncs = self.module_funcs;
+        let sig: &'g FuncSig = module_funcs[owner.0 as usize]
+            .values()
+            .find(|s| s.node == target_node)
+            .ok_or_else(|| self.error(callee, "internal: resolved function has no signature"))?;
+        let display_name = display_path(segments);
 
         self.world.resolved.insert(callee, sig.node);
         self.world.types.insert(
@@ -862,74 +906,116 @@ impl<'w, 'arena, 'g> Analyzer<'w, 'arena, 'g> {
         Ok(sig.ret.clone())
     }
 
-    fn resolve_path(
+    /// Resolve a call-site path to a function node and its owning module.
+    ///
+    /// Resolution order:
+    ///   1. Same-module function (single segment only — locals are checked elsewhere).
+    ///   2. Local binding from a `use` decl. `Func` is callable as a bare name;
+    ///      `Module(m)` rebases the rest of the walk to start at `m`'s path.
+    ///   3. Absolute path through the module graph: `segments[0]` must name a
+    ///      loaded top-level module (or a namespace prefix that is one).
+    ///
+    /// Once a starting module is established, middle segments walk further
+    /// into the namespace tree (each step must be a known prefix) and the
+    /// final segment must be a public function in the resolved module.
+    fn resolve_call_path(
         &self,
         callee: NodeId,
-        segments: &[&str],
-    ) -> AnalysisResult<NodeId> {
-        let module = &self.graph.modules[self.module.0 as usize];
-        match segments.len() {
-            0 => Err(self.error(callee, "empty path")),
-            1 => {
-                let name = segments[0];
-                // Same-module lookup first, then imports.
-                if let Some(sig) = self.module_funcs[self.module.0 as usize].get(name) {
-                    return Ok(sig.node);
-                }
-                if let Some(&(_, fn_node)) = module.imports.get(name) {
-                    return Ok(fn_node);
-                }
-                Err(self.error(callee, format!("undefined function `{name}`")))
-            }
-            _ => {
-                let alias = segments[0];
-                let target_mod = module.module_aliases.get(alias).copied().ok_or_else(|| {
-                    self.error(callee, format!("`{alias}` is not a module"))
-                })?;
-                if segments.len() != 2 {
-                    return Err(self.error(
-                        callee,
-                        "only `module::function` paths are supported",
-                    ));
-                }
-                let item = segments[1];
-                let target_mod_label = self.graph.modules[target_mod.0 as usize]
-                    .mod_path
-                    .join("::");
-                let sig = self.module_funcs[target_mod.0 as usize]
-                    .get(item)
-                    .ok_or_else(|| {
-                        self.error(
-                            callee,
-                            format!("module `{target_mod_label}` has no item `{item}`"),
-                        )
-                    })?;
-                if !sig.is_pub {
-                    return Err(self.error(
-                        callee,
-                        format!(
-                            "function `{item}` in module `{target_mod_label}` is not public"
-                        ),
-                    ));
-                }
-                Ok(sig.node)
-            }
+        segments: &[&'arena str],
+    ) -> AnalysisResult<(NodeId, ModuleId)> {
+        if segments.is_empty() {
+            return Err(self.error(callee, "empty path"));
         }
-    }
 
-    fn signature_for(&self, fn_decl: NodeId) -> Option<FuncSig> {
-        // Find the module owning this fn_decl. Stored signatures index by name;
-        // here we scan since cross-module signatures don't index by NodeId.
-        // The number of FnDecls is small per module so this is fine.
-        for (mod_idx, funcs) in self.module_funcs.iter().enumerate() {
-            for sig in funcs.values() {
-                if sig.node == fn_decl {
-                    let _ = mod_idx;
-                    return Some(sig.clone());
-                }
+        let module = &self.graph.modules[self.module.0 as usize];
+
+        // (1) Single-segment, same-module function.
+        if segments.len() == 1 {
+            let name = segments[0];
+            if let Some(sig) = self.module_funcs[self.module.0 as usize].get(name) {
+                return Ok((sig.node, self.module));
+            }
+            // (2) Local `use` binding: must be a Func (Module here would be
+            // a bare module name used in value position, not callable).
+            if let Some(binding) = module.bindings.get(name) {
+                return match *binding {
+                    Binding::Func { node, owner } => Ok((node, owner)),
+                    Binding::Module(_) => Err(self.error(
+                        callee,
+                        format!("`{name}` is a module, not a function"),
+                    )),
+                };
+            }
+            return Err(self.error(callee, format!("undefined function `{name}`")));
+        }
+
+        // (2) Local binding rebase: `use math::geometry;` binds `geometry` to
+        // Module(geo); a path `geometry::area(...)` continues from geo's path.
+        let head = segments[0];
+        let (start_path, rest): (Vec<String>, &[&str]) =
+            if let Some(Binding::Module(m)) = module.bindings.get(head).copied() {
+                (
+                    self.graph.modules[m.0 as usize].mod_path.clone(),
+                    &segments[1..],
+                )
+            } else if let Some(Binding::Func { .. }) = module.bindings.get(head).copied() {
+                return Err(self.error(
+                    callee,
+                    format!("`{head}` is a function, not a module"),
+                ));
+            } else if self.graph.is_namespace(&[head]) {
+                // (3) Absolute: `segments[0]` is a top-level loaded module or namespace.
+                (vec![head.to_string()], &segments[1..])
+            } else {
+                return Err(self.error(callee, format!("module `{head}` not found")));
+            };
+
+        // Walk remaining segments through the namespace tree. All but the
+        // last must extend a known prefix; the last must be a public function
+        // in the resolved module.
+        let mut current_path = start_path;
+        for &seg in &rest[..rest.len().saturating_sub(1)] {
+            current_path.push(seg.to_string());
+            if !self.graph.is_namespace(&current_path) {
+                return Err(self.error(
+                    callee,
+                    format!("module `{}` not found", current_path.join("::")),
+                ));
             }
         }
-        None
+
+        let owner = self
+            .graph
+            .lookup(&current_path)
+            .ok_or_else(|| {
+                self.error(
+                    callee,
+                    format!(
+                        "`{}` is a namespace, not a module with items",
+                        current_path.join("::")
+                    ),
+                )
+            })?;
+
+        let item = *rest
+            .last()
+            .expect("multi-segment path always has a trailing item segment");
+        let owner_label = current_path.join("::");
+        let sig = self.module_funcs[owner.0 as usize].get(item).ok_or_else(|| {
+            self.error(
+                callee,
+                format!("module `{owner_label}` has no item `{item}`"),
+            )
+        })?;
+        // Same-module access (e.g. `math::abs` from inside math.ecs) doesn't
+        // require `pub`; cross-module access does.
+        if owner != self.module && !sig.is_pub {
+            return Err(self.error(
+                callee,
+                format!("function `{item}` in module `{owner_label}` is not public"),
+            ));
+        }
+        Ok((sig.node, owner))
     }
 
     fn check_builtin(
@@ -972,11 +1058,11 @@ impl<'w, 'arena, 'g> Analyzer<'w, 'arena, 'g> {
         if scope.contains_key(name) {
             return Err(self.error(id, format!("duplicate binding `{name}`")));
         }
-        scope.insert(name.to_string(), Binding { decl: id, ty });
+        scope.insert(name.to_string(), Local { decl: id, ty });
         Ok(())
     }
 
-    fn resolve_local(&self, name: &str) -> Option<Binding> {
+    fn resolve_local(&self, name: &str) -> Option<Local> {
         self.scopes
             .iter()
             .rev()
