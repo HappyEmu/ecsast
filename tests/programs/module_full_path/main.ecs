@@ -1,0 +1,9 @@
+// Exercises arbitrary-depth path access. `use math::geometry::area;` triggers
+// loading of math/geometry.ecs, and the call site uses the canonical path
+// without an alias.
+use math::geometry::area;
+
+fn main() {
+    print(area(2, 5));                  // bare-name from use
+    print(math::geometry::area(3, 6));  // full-path access via namespace
+}

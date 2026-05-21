@@ -1,0 +1,17 @@
+use math::pi;
+
+pub fn rect_area(w: int, h: int) -> int {
+    return w * h;
+}
+
+pub fn rect_perimeter(w: int, h: int) -> int {
+    return 2 * (w + h);
+}
+
+pub fn triangle_area(base: float, height: float) -> float {
+    return base * height / 2.0;
+}
+
+pub fn circle_area(radius: float) -> float {
+    return pi() * radius * radius;
+}
