@@ -3,3 +3,8 @@
 stress/*
 !stress/*.py
 !stress/*.ecs
+zed-ecsast/grammars/
+
+# Stray binaries produced by `cargo run -- examples/<name>/main.ecs`
+examples/*/stdlib_demo
+examples/*/output

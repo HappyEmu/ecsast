@@ -1,0 +1,5 @@
+use util::helper;
+
+fn main() {
+    print(helper());
+}

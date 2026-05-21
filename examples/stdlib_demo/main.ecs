@@ -1,0 +1,51 @@
+// A small demo of the multi-file module system.
+//
+// Layout (resolved relative to this file):
+//
+//   stdlib_demo/
+//     main.ecs           — this file
+//     math.ecs           — abs, max, min, clamp
+//     math/geometry.ecs  — rect_area, rect_perimeter, triangle_area
+//     numbers.ecs        — is_even, is_odd, gcd, lcm
+//     logic.ecs          — xor, nand, implies
+//
+// Three import styles, all shown below:
+//
+//   `use math;`                  alias a top-level module → `math::fn(...)`
+//   `use math::geometry;`        alias a nested module     → `geometry::fn(...)`
+//   `use math::geometry::area;`  pull an item into scope   → `area(...)`
+//
+// Modules are also addressable by their canonical path without any `use`,
+// as long as some other `use` has caused them to be loaded.
+
+use math;
+use numbers;
+use logic;
+use math::geometry;  // alias the nested module
+
+fn main() {
+    // Top-level module alias.
+    print(math::abs(-7));            // 7
+    print(math::max(3, 9));          // 9
+    print(math::clamp(15, 0, 10));   // 10
+
+    // Nested module alias.
+    print(geometry::rect_area(3, 4));         // 12
+    print(geometry::rect_perimeter(3, 4));    // 14
+    print(geometry::triangle_area(5.0, 4.0)); // 10  (float, printed via %g)
+    print(geometry::circle_area(2.0));        // ~12.5664
+    print(math::pi());                        // 3.14159
+
+    // Canonical full-path access — no extra `use` needed for `math::geometry`.
+    print(math::geometry::rect_area(7, 8));   // 56
+
+    // Sibling top-level modules.
+    print(numbers::is_even(42));     // true
+    print(numbers::is_odd(42));      // false
+    print(numbers::gcd(54, 24));     // 6
+    print(numbers::lcm(4, 6));       // 12
+
+    print(logic::xor(true, false));     // true
+    print(logic::nand(true, true));     // false
+    print(logic::implies(true, false)); // false
+}

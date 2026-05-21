@@ -1,0 +1,28 @@
+pub inline fn pi() -> float {
+    return 3.141592653589793;
+}
+
+pub inline fn abs(n: int) -> int {
+    if n < 0 {
+        return -n;
+    }
+    return n;
+}
+
+pub inline fn max(a: int, b: int) -> int {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+pub inline fn min(a: int, b: int) -> int {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+pub fn clamp(value: int, lo: int, hi: int) -> int {
+    return min(max(value, lo), hi);
+}

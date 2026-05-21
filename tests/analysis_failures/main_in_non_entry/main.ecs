@@ -1,0 +1,5 @@
+use other::go;
+
+fn main() {
+    print(go());
+}

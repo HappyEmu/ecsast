@@ -1,0 +1,6 @@
+use a::from_a;
+use b::from_b;
+
+fn main() {
+    print(from_a() + from_b());
+}

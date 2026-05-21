@@ -1,0 +1,5 @@
+use nope::x;
+
+fn main() {
+    print(x());
+}

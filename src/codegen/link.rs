@@ -43,6 +43,7 @@ const RUNTIME_C: &str = r#"
 #include <math.h>
 void ecsast_print_int(long n) { printf("%ld\n", n); }
 void ecsast_print_float(double n) { printf("%g\n", n); }
+void ecsast_print_bool(signed char b) { puts(b ? "true" : "false"); }
 void ecsast_print_str(const char *s, long len) { fwrite(s, 1, len, stdout); fputc('\n', stdout); }
 static int g_argc;
 static char **g_argv;

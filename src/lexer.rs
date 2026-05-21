@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::span::Span;
 
 // ---------------------------------------------------------------------------
@@ -5,15 +7,17 @@ use crate::span::Span;
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum TokenKind {
+pub enum TokenKind<'src> {
     // Literals
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(String),
+    /// String literal value. Borrowed from source when no escapes are present,
+    /// owned when escape sequences forced a fresh allocation.
+    Str(Cow<'src, str>),
 
     // Identifiers / keywords
-    Ident(String),
+    Ident(&'src str),
     Fn,
     Inline,
     Let,
@@ -21,6 +25,8 @@ pub enum TokenKind {
     Else,
     While,
     Return,
+    Use,
+    Pub,
 
     // Arithmetic operators
     Plus,
@@ -55,6 +61,7 @@ pub enum TokenKind {
     Eq,
     Arrow, // ->
     Colon,
+    ColonColon, // ::
     Comma,
     Semicolon,
 
@@ -71,8 +78,8 @@ pub enum TokenKind {
 }
 
 #[derive(Clone, Debug)]
-pub struct Token {
-    pub kind: TokenKind,
+pub struct Token<'src> {
+    pub kind: TokenKind<'src>,
     pub span: Span,
 }
 
@@ -128,7 +135,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<Token> {
+    pub fn tokenize(&mut self) -> Vec<Token<'a>> {
         let mut tokens = Vec::new();
         loop {
             self.skip_whitespace_and_comments();
@@ -153,7 +160,7 @@ impl<'a> Lexer<'a> {
         tokens
     }
 
-    fn lex_one(&mut self, first: char) -> TokenKind {
+    fn lex_one(&mut self, first: char) -> TokenKind<'a> {
         match first {
             '+' => {
                 self.advance();
@@ -255,7 +262,12 @@ impl<'a> Lexer<'a> {
             }
             ':' => {
                 self.advance();
-                TokenKind::Colon
+                if self.peek() == Some(':') {
+                    self.advance();
+                    TokenKind::ColonColon
+                } else {
+                    TokenKind::Colon
+                }
             }
             ',' => {
                 self.advance();
@@ -296,9 +308,30 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_string(&mut self) -> TokenKind {
+    fn lex_string(&mut self) -> TokenKind<'a> {
         self.advance(); // opening `"`
-        let mut s = String::new();
+        let body_start = self.pos;
+
+        // Fast path: scan to closing `"` and borrow from source if we hit no
+        // escapes. Falling into the slow path only happens when we see `\`.
+        loop {
+            match self.peek() {
+                Some('"') => {
+                    let end = self.pos;
+                    self.advance(); // closing `"`
+                    return TokenKind::Str(Cow::Borrowed(&self.src[body_start..end]));
+                }
+                Some('\\') => break,
+                Some(_) => {
+                    self.advance();
+                }
+                None => panic!("unterminated string literal"),
+            }
+        }
+
+        // Slow path: we hit an escape — copy everything seen so far into an
+        // owned String and keep going.
+        let mut s = String::from(&self.src[body_start..self.pos]);
         loop {
             match self.advance() {
                 Some('"') => break,
@@ -313,10 +346,10 @@ impl<'a> Lexer<'a> {
                 None => panic!("unterminated string literal"),
             }
         }
-        TokenKind::Str(s)
+        TokenKind::Str(Cow::Owned(s))
     }
 
-    fn lex_number(&mut self) -> TokenKind {
+    fn lex_number(&mut self) -> TokenKind<'a> {
         let start = self.pos;
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
             self.advance();
@@ -333,7 +366,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_ident_or_keyword(&mut self) -> TokenKind {
+    fn lex_ident_or_keyword(&mut self) -> TokenKind<'a> {
         let start = self.pos;
         while matches!(self.peek(), Some(c) if c.is_alphanumeric() || c == '_') {
             self.advance();
@@ -346,9 +379,11 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
             "return" => TokenKind::Return,
+            "use" => TokenKind::Use,
+            "pub" => TokenKind::Pub,
             "true" => TokenKind::Bool(true),
             "false" => TokenKind::Bool(false),
-            word => TokenKind::Ident(word.to_string()),
+            word => TokenKind::Ident(word),
         }
     }
 }

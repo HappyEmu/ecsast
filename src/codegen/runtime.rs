@@ -10,6 +10,7 @@ use std::{collections::HashMap, error::Error};
 pub enum RuntimeFn {
     PrintInt,
     PrintFloat,
+    PrintBool,
     PrintStr,
     InitArgs,
     Argc,
@@ -41,6 +42,14 @@ pub fn declare_runtime(module: &mut ObjectModule) -> Result<FunctionRuntime, Box
     ids.insert(
         RuntimeFn::PrintFloat,
         module.declare_function("ecsast_print_float", Linkage::Import, &sig)?,
+    );
+
+    // ecsast_print_bool(i8) -> void
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I8));
+    ids.insert(
+        RuntimeFn::PrintBool,
+        module.declare_function("ecsast_print_bool", Linkage::Import, &sig)?,
     );
 
     // ecsast_print_str(ptr, i64) -> void

@@ -1,0 +1,10 @@
+id = "ecsast"
+name = "ECSAST"
+description = "Syntax highlighting for the ECSAST language"
+version = "0.0.1"
+schema_version = 1
+authors = ["Urs Gerber <ug.gerber@gmail.com>"]
+
+[grammars.ecsast]
+repository = "https://github.com/HappyEmu/tree-sitter-ecsast"
+commit = "f48939e4dd3f53fc5bb9c4d8a2c736f3fb3246e8"

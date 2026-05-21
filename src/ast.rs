@@ -57,6 +57,11 @@ pub enum NodeKind<'arena> {
 
     // Expressions
     Ident(&'arena str),
+    /// A `::`-separated path that appears in callee position (e.g. `math::sqrt`).
+    /// Bare calls produce a one-segment path so call dispatch has a single shape.
+    Path {
+        segments: &'arena [&'arena str],
+    },
     BinOp {
         op: BinOp,
         lhs: NodeId,
@@ -106,10 +111,15 @@ pub enum NodeKind<'arena> {
         ret_ty: Option<NodeId>,
         body: NodeId,
         inline: bool,
+        is_pub: bool,
     },
     Param {
         name: &'arena str,
         ty: Option<NodeId>,
+    },
+    /// `use a::b::c;` — top-level import declaration.
+    UseDecl {
+        path: &'arena [&'arena str],
     },
 
     // Types
@@ -192,8 +202,13 @@ pub struct AstWorld<'arena> {
     pub types: SparseSecondaryMap<NodeId, TypeInfo>,
     /// Parent node (parent-link pass).
     pub parents: SecondaryMap<NodeId, NodeId>,
-    /// Name-resolution: `Ident` node → declaration node.
+    /// Name-resolution: `Ident`/`Path` node → declaration node.
     pub resolved: SecondaryMap<NodeId, NodeId>,
+    /// Mangled symbol name for a `FnDecl` node (semantic pass).
+    /// Codegen and interpreter look up functions via this name so they
+    /// never have to recompute mangling themselves. Arena-allocated so
+    /// reads are `Copy` and no clones are needed downstream.
+    pub mangled_names: SparseSecondaryMap<NodeId, &'arena str>,
 }
 
 impl<'arena> Default for AstWorld<'arena> {
@@ -210,6 +225,7 @@ impl<'arena> AstWorld<'arena> {
             types: SparseSecondaryMap::new(),
             parents: SecondaryMap::new(),
             resolved: SecondaryMap::new(),
+            mangled_names: SparseSecondaryMap::new(),
         }
     }
 
@@ -226,5 +242,11 @@ impl<'arena> AstWorld<'arena> {
 
     pub fn span(&self, id: NodeId) -> Span {
         self.spans[id]
+    }
+
+    /// Mangled symbol name for a `FnDecl` node; panics if the semantic pass
+    /// has not yet populated it.
+    pub fn mangled(&self, id: NodeId) -> &'arena str {
+        self.mangled_names[id]
     }
 }
